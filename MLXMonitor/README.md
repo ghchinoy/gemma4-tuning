@@ -2,6 +2,8 @@
 
 A native macOS application built with Swift and SwiftUI Charts for real-time monitoring of MLX fine-tuning processes.
 
+<img width="1012" height="644" alt="Image" src="https://github.com/user-attachments/assets/490736f0-f1f9-4fa1-992f-f0798eb2cb66" />
+
 ## Overview
 When running the `mlxtune train` pipeline, the training script emits rich metrics (Train loss, Validation loss, learning rate, memory usage, and tokens per second) into a `training_log.jsonl` file. 
 

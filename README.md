@@ -1,6 +1,6 @@
 # Gemmmma Models with MLX and llama.cpp
 
-This repository contains an end-to-end pipeline (`mlxtune`) for downloading, preparing, fine-tuning, and exporting Gemma models locally on Apple Silicon using MLX. The final output is a highly optimized GGUF file ready for use in Go applications (like `bardite`) via `llama.cpp`.
+This repository contains an end-to-end pipeline (`mlxtune`) for downloading, preparing, fine-tuning, and exporting Gemma models locally on Apple Silicon using MLX. The final output is a highly optimized GGUF file ready for use in Go applications or others via `llama.cpp`.
 
 ## Prerequisites
 
@@ -61,6 +61,8 @@ uv run mlxtune clean
 ## MLXMonitor (Live Visual Dashboard)
 
 This repository also includes a native macOS Swift application called **MLXMonitor** that provides a real-time, interactive dashboard for your training runs. 
+
+<img width="1012" height="644" alt="Image" src="https://github.com/user-attachments/assets/490736f0-f1f9-4fa1-992f-f0798eb2cb66" />
 
 As `mlxtune train` runs in your terminal, it emits metrics to a `training_log.jsonl` file. You can open MLXMonitor to see a live-updating chart of your Train and Validation loss, allowing you to instantly identify the exact iteration where your model hits its "sweet spot" before overfitting.
 
