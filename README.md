@@ -58,6 +58,19 @@ Quickly cleans out temporary training directories (like `adapters/` and `fused_m
 uv run mlxtune clean
 ```
 
+## MLXMonitor (Live Visual Dashboard)
+
+This repository also includes a native macOS Swift application called **MLXMonitor** that provides a real-time, interactive dashboard for your training runs. 
+
+As `mlxtune train` runs in your terminal, it emits metrics to a `training_log.jsonl` file. You can open MLXMonitor to see a live-updating chart of your Train and Validation loss, allowing you to instantly identify the exact iteration where your model hits its "sweet spot" before overfitting.
+
+To run the monitor (in a separate terminal tab):
+```bash
+cd MLXMonitor
+swift run
+```
+*See [MLXMonitor/README.md](MLXMonitor/README.md) for more details.*
+
 ## Serving the Model
 
 Once exported, you can serve your custom-trained model via the `llama-server`. This spins up a local HTTP server that mimics the OpenAI API, perfect for Go apps.
