@@ -1,0 +1,19 @@
+.venv
+.python-version
+__pycache__
+.vscode/
+
+# mlxtune pipeline directories and artifacts
+/model/
+/data/
+/adapters/
+/fused_model/
+/fused_model_dequantized/
+*.gguf
+*.jsonl
+
+# external tools
+/llama.cpp/
+
+# MLXMonitor Swift artifacts
+/MLXMonitor/.build/
