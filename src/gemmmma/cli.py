@@ -15,7 +15,7 @@ def download_model(model_id, dest):
     snapshot_download(repo_id=model_id, local_dir=dest)
     print("==> Download complete.")
 
-def prep_dataset(dataset_id, dest_dir, max_samples=None):
+def prep_dataset(dataset_id, dataset_config, dest_dir, max_samples=None):
     """
     Downloads a dataset from Hugging Face and prepares it into the JSONL 
     ChatML format required by MLX for fine-tuning.
@@ -24,13 +24,16 @@ def prep_dataset(dataset_id, dest_dir, max_samples=None):
     os.makedirs(dest_dir, exist_ok=True)
     
     try:
-        ds = load_dataset(dataset_id, split="train")
+        from datasets import Audio
+        ds = load_dataset(dataset_id, name=dataset_config, split="train")
+        if "audio" in ds.features:
+            ds = ds.cast_column("audio", Audio(decode=False))
     except Exception as e:
         print(f"Error loading dataset: {e}")
-        print("\nNOTE: GAIR/lima is a 'gated' dataset. To use it, you must:")
-        print("  1. Go to https://huggingface.co/datasets/GAIR/lima and accept the terms.")
-        print("  2. Run `huggingface-cli login` in your terminal.")
-        print("For this tutorial, try running with the open dataset: --dataset yahma/alpaca-cleaned")
+        print("\nNOTE: Some datasets are 'gated'. To use them, you must:")
+        print("  1. Go to their Hugging Face dataset page and accept the terms.")
+        print("  2. Run `hf auth login` in your terminal.")
+        print("For an open audio dataset test, try: --dataset PolyAI/minds14 --dataset-config en-US")
         return
 
     # Shuffle to ensure a good mix of examples, and slice for fast prototyping
@@ -48,16 +51,42 @@ def prep_dataset(dataset_id, dest_dir, max_samples=None):
         Note: When handling multimodal Gemma 4 data, this is where you will 
         inject {"type": "image", ...} dictionaries into the content array!
         """
-        prompt = row.get("instruction", row.get("prompt", ""))
-        if row.get("input"): 
-            prompt += "\n\nContext: " + row.get("input", "")
+        # For PolyAI/minds14 dataset mapping
+        if "english_transcription" in row:
+            prompt = "Transcribe the following audio:"
+            completion = row["english_transcription"]
+        else:
+            prompt = row.get("instruction", row.get("prompt", "Analyze the provided input."))
+            if row.get("input"): 
+                prompt += "\n\nContext: " + row.get("input", "")
+            completion = row.get("output", row.get("completion", row.get("response", "")))
         
-        completion = row.get("output", row.get("completion", row.get("response", "")))
+        audio_data = row.get("audio", None)
+        audio_path = None
         
+        # Hugging Face 'Audio' feature returns a dict with 'path'
+        if isinstance(audio_data, dict) and "path" in audio_data:
+            audio_path = audio_data["path"]
+        elif isinstance(audio_data, str):
+            audio_path = audio_data
+        
+        if audio_path:
+            # Gemma 4 Interleaved ChatML standard
+            user_content = [
+                {"type": "audio", "audio": audio_path},
+                {"type": "text", "text": prompt}
+            ]
+            assistant_content = [
+                {"type": "text", "text": completion}
+            ]
+        else:
+            user_content = prompt
+            assistant_content = completion
+            
         return {
             "messages": [
-                {"role": "user", "content": prompt}, 
-                {"role": "assistant", "content": completion}
+                {"role": "user", "content": user_content}, 
+                {"role": "assistant", "content": assistant_content}
             ]
         }
 
@@ -76,7 +105,7 @@ def prep_dataset(dataset_id, dest_dir, max_samples=None):
             
     print(f"==> Dataset prepped and saved to {dest_dir}/")
 
-def run_train(model_path, data_path, iters, batch_size, log_file="training_log.jsonl"):
+def run_train(model_path, data_path, iters, batch_size, log_file="training_log.jsonl", multimodal=False, tune_audio_encoder=False):
     """
     Executes the LoRA training loop on the Apple GPU (Metal).
     This freezes the base model and only updates a tiny set of adapter weights.
@@ -86,14 +115,31 @@ def run_train(model_path, data_path, iters, batch_size, log_file="training_log.j
     import datetime
     
     print(f"==> Starting LoRA training with MLX...")
-    cmd = [
-        "python", "-m", "mlx_lm", "lora",
-        "--model", model_path,
-        "--train",
-        "--data", data_path,
-        "--iters", str(iters),
-        "--batch-size", str(batch_size)
-    ]
+    
+    if multimodal:
+        # Modern mlx_vlm CLI syntax
+        cmd = [
+            "python", "-m", "mlx_vlm.lora",
+            "--model-path", model_path,
+            "--dataset", data_path,
+            "--iters", str(iters),
+            "--batch-size", str(batch_size),
+            "--output-path", "adapters"
+        ]
+        
+        if tune_audio_encoder:
+            print("==> Targeting Audio Encoder layers for Multimodal LoRA tuning.")
+            # Adjust if mlx_vlm uses specific regex or flags for fine-tuning specific components
+            # e.g., cmd.extend(["--fine-tune-type", "audio_encoder"]) 
+    else:
+        cmd = [
+            "python", "-m", "mlx_lm.lora",
+            "--model", model_path,
+            "--train",
+            "--data", data_path,
+            "--iters", str(iters),
+            "--batch-size", str(batch_size)
+        ] 
     
     print(f"==> Logging metrics to {log_file}")
     
@@ -105,7 +151,8 @@ def run_train(model_path, data_path, iters, batch_size, log_file="training_log.j
             "model": model_path,
             "data": data_path,
             "total_iters": iters,
-            "batch_size": batch_size
+            "batch_size": batch_size,
+            "multimodal": multimodal
         }) + "\n")
         
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -116,8 +163,11 @@ def run_train(model_path, data_path, iters, batch_size, log_file="training_log.j
     for line in process.stdout:
         print(line, end="") # Keep printing to the terminal
         
+        # Clean ANSI escape codes to ensure clean regex matching
+        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+        
         log_entry = None
-        train_match = train_pattern.search(line)
+        train_match = train_pattern.search(clean_line)
         if train_match:
             log_entry = {
                 "type": "train", 
@@ -130,7 +180,7 @@ def run_train(model_path, data_path, iters, batch_size, log_file="training_log.j
                 "peak_mem_gb": float(train_match.group(7))
             }
             
-        val_match = val_pattern.search(line)
+        val_match = val_pattern.search(clean_line)
         if val_match:
             log_entry = {
                 "type": "val", 
@@ -145,39 +195,176 @@ def run_train(model_path, data_path, iters, batch_size, log_file="training_log.j
                 
     process.wait()
     
+    if multimodal:
+        # Patch the adapter_config.json because mlx_vlm.generate expects "rank" at the root level,
+        # but mlx_lm leaves a stale one with "lora_parameters", or mlx_vlm doesn't write it fully.
+        
+        # In newer versions, mlx_vlm often dumps adapter files at the root instead of the output path.
+        if os.path.exists("adapter_config.json") and not os.path.exists("adapters/adapter_config.json"):
+            os.makedirs("adapters", exist_ok=True)
+            shutil.move("adapter_config.json", "adapters/adapter_config.json")
+            if os.path.exists("adapters.safetensors"):
+                shutil.move("adapters.safetensors", "adapters/adapters.safetensors")
+
+        adapter_config_path = "adapters/adapter_config.json"
+        if os.path.exists(adapter_config_path):
+            try:
+                with open(adapter_config_path, "r") as f:
+                    config = json.load(f)
+                if "lora_parameters" in config and "rank" not in config:
+                    # Only inject the actual LoRA parameters into the root
+                    # mlx_vlm's get_peft_model passes kwargs directly, so extra keys will crash it.
+                    clean_config = {}
+                    lora_params = config["lora_parameters"]
+                    for key in ["rank", "alpha", "dropout"]:
+                        if key in lora_params:
+                            clean_config[key] = lora_params[key]
+                        elif key == "alpha" and "scale" in lora_params and "rank" in lora_params:
+                            clean_config["alpha"] = lora_params["scale"] * lora_params["rank"]
+                    
+                    with open(adapter_config_path, "w") as f:
+                        json.dump(clean_config, f, indent=2)
+                elif "rank" not in config:
+                    clean_config = {"rank": 8, "alpha": 160.0, "dropout": 0.0}
+                    with open(adapter_config_path, "w") as f:
+                        json.dump(clean_config, f, indent=2)
+            except Exception as e:
+                print(f"Warning: Could not patch adapter_config.json: {e}")
+                
     end_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with open(log_file, "a") as f:
         f.write(json.dumps({"type": "status", "status": "completed", "timestamp": end_time}) + "\n")
 
-def run_eval(model_path, adapter_path, prompt):
+def run_eval(model_path, adapter_path, prompt, multimodal=False):
     """
     Tests the newly trained adapter by loading the base model, 
     injecting the adapter weights in memory, and generating text.
     """
     print(f"==> Evaluating model...")
-    cmd = [
-        "python", "-m", "mlx_lm", "generate",
-        "--model", model_path,
-        "--adapter-path", adapter_path,
-        "--prompt", prompt,
-        "--max-tokens", "200"
-    ]
+    if multimodal:
+        cmd = [
+            "python", "-m", "mlx_vlm.generate",
+            "--model", model_path,
+            "--adapter-path", adapter_path,
+            "--prompt", prompt,
+            "--max-tokens", "200"
+        ]
+    else:
+        cmd = [
+            "python", "-m", "mlx_lm.generate",
+            "--model", model_path,
+            "--adapter-path", adapter_path,
+            "--prompt", prompt,
+            "--max-tokens", "200"
+        ]
     subprocess.run(cmd)
 
-def run_fuse(model_path, adapter_path, save_path):
+def run_fuse(model_path, adapter_path, save_path, multimodal=False):
     """
     Permanently bakes the trained LoRA adapters into the base model.
     Crucially, it uses --dequantize to convert the Apple-specific 4-bit MLX 
     format back into standard 16-bit PyTorch tensors so llama.cpp can read it.
     """
     print(f"==> Fusing LoRA adapters into base model (dequantizing for GGUF compatibility)...")
-    cmd = [
-        "python", "-m", "mlx_lm", "fuse",
-        "--model", model_path,
-        "--adapter-path", adapter_path,
-        "--save-path", save_path,
-        "--dequantize"  # Required for clean llama.cpp conversion
-    ]
+    if multimodal:
+        # mlx_vlm doesn't have a native fuse CLI yet, so we build the script inline
+        script = f"""
+import os
+from mlx_vlm.utils import load
+from mlx_vlm.trainer.utils import apply_lora_layers
+from mlx_vlm.trainer.lora import LoRaLayer
+from mlx.utils import tree_flatten
+import mlx.core as mx
+import mlx.nn as nn
+import json
+import shutil
+
+print("Loading base multimodal model...")
+model, processor = load("{model_path}")
+
+print("Applying LoRA adapters...")
+model = apply_lora_layers(model, "{adapter_path}")
+
+print("Fusing weights...")
+model.eval()
+
+# Manually fuse the LoRA layers into the linear base weights
+for i, layer in enumerate(model.language_model.model.layers):
+    for name, module in layer.named_modules():
+        if isinstance(module, LoRaLayer):
+            # Calculate the fused weight: base_weight + (B @ A) * scale
+            base_weight = module.original_layer.weight
+            lora_b = module.B
+            lora_a = module.A
+            scale = module.alpha
+            
+            # Dequantize if the base layer is quantized so we can add the LoRA math
+            if hasattr(module.original_layer, "scales"):
+                base_weight = mx.dequantize(
+                    module.original_layer.weight,
+                    module.original_layer.scales,
+                    module.original_layer.biases,
+                    module.original_layer.group_size,
+                    module.original_layer.bits
+                )
+                
+            # MLX weights are [out_features, in_features].
+            # A is [256, 8], B is [8, 1536]. 
+            # A @ B yields [256, 1536]. Base weight is [1536, 256].
+            # We transpose to match.
+            lora_update = (lora_a @ lora_b).T * scale
+            fused_weight = base_weight + lora_update
+            use_bias = "bias" in module.original_layer.parameters()
+            
+            # Replace the LoRA layer with a standard linear layer containing the fused weights
+            new_linear = nn.Linear(base_weight.shape[1], base_weight.shape[0], bias=use_bias)
+            new_linear.weight = fused_weight
+            
+            if use_bias:
+                new_linear.bias = module.original_layer.bias
+                
+            # Keep it quantized if requested (optional, but standard for fused export)
+            if hasattr(module.original_layer, "scales"):
+                new_linear = nn.QuantizedLinear.from_linear(
+                    new_linear,
+                    module.original_layer.group_size,
+                    module.original_layer.bits
+                )
+                
+            # Update the parent module
+            parent_name = ".".join(name.split(".")[:-1])
+            child_name = name.split(".")[-1]
+            
+            if parent_name == "":
+                setattr(layer, child_name, new_linear)
+            else:
+                parent = layer
+                for part in parent_name.split("."):
+                    parent = getattr(parent, part)
+                setattr(parent, child_name, new_linear)
+
+print("Saving fused model to {save_path}...")
+os.makedirs("{save_path}", exist_ok=True)
+
+# Save the trainable (now fully fused) parameters
+mx.save_safetensors("{save_path}/model.safetensors", dict(tree_flatten(model.parameters())))
+
+# Copy processor and config files
+for file in os.listdir("{model_path}"):
+    if file.endswith(".json") or file.endswith(".jinja"):
+        shutil.copy2(os.path.join("{model_path}", file), "{save_path}")
+        
+print("Multimodal fusion complete!")
+"""
+        cmd = ["python", "-c", script]
+    else:
+        cmd = [
+            "python", "-m", "mlx_lm.fuse",
+            "--model", model_path,
+            "--adapter-path", adapter_path,
+            "--save-path", save_path,
+            "--dequantize"  # Required for clean llama.cpp conversion
+        ]
     subprocess.run(cmd)
 
 def run_gguf(base_model_path, fused_model_path, output_path, outtype="q8_0"):
@@ -244,6 +431,7 @@ def main():
     # 2 & 3. Prep Data Command
     prep_parser = subparsers.add_parser("prep", help="Download and prepare dataset")
     prep_parser.add_argument("--dataset", default="yahma/alpaca-cleaned", help="Hugging Face dataset ID")
+    prep_parser.add_argument("--dataset-config", default=None, help="Hugging Face dataset configuration name (e.g. en-US)")
     prep_parser.add_argument("--dest", default="./data", help="Destination folder for JSONL files")
     prep_parser.add_argument("--samples", type=int, default=1000, help="Max samples to use for fast training")
 
@@ -254,18 +442,22 @@ def main():
     train_parser.add_argument("--iters", type=int, default=200, help="Number of training iterations (low for testing)")
     train_parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     train_parser.add_argument("--log-file", default="training_log.jsonl", help="File to output JSONL metrics")
+    train_parser.add_argument("--multimodal", action="store_true", help="Use mlx_vlm for multimodal training")
+    train_parser.add_argument("--tune-audio-encoder", action="store_true", help="Target Audio Encoder for Multimodal LoRA")
 
     # 5. Eval Command
     eval_parser = subparsers.add_parser("eval", help="Test the fine-tuned model")
     eval_parser.add_argument("--model", default="./model", help="Path to base model")
     eval_parser.add_argument("--adapter", default="./adapters", help="Path to trained adapter directory")
     eval_parser.add_argument("--prompt", required=True, help="Text prompt to test")
+    eval_parser.add_argument("--multimodal", action="store_true", help="Use mlx_vlm for multimodal evaluation")
 
     # 6. Fuse Command
     fuse_parser = subparsers.add_parser("fuse", help="Fuse adapters into base model")
     fuse_parser.add_argument("--model", default="./model", help="Path to base model")
     fuse_parser.add_argument("--adapter", default="./adapters", help="Path to trained adapter directory")
     fuse_parser.add_argument("--dest", default="./fused_model_dequantized", help="Destination folder for fused model")
+    fuse_parser.add_argument("--multimodal", action="store_true", help="Use mlx_vlm for multimodal fusing")
 
     # 7. GGUF Export Command
     gguf_parser = subparsers.add_parser("gguf", help="Convert fused model to GGUF")
@@ -282,13 +474,13 @@ def main():
     if args.command == "download":
         download_model(args.model, args.dest)
     elif args.command == "prep":
-        prep_dataset(args.dataset, args.dest, args.samples)
+        prep_dataset(args.dataset, args.dataset_config, args.dest, args.samples)
     elif args.command == "train":
-        run_train(args.model, args.data, args.iters, args.batch_size, args.log_file)
+        run_train(args.model, args.data, args.iters, args.batch_size, args.log_file, args.multimodal, args.tune_audio_encoder)
     elif args.command == "eval":
-        run_eval(args.model, args.adapter, args.prompt)
+        run_eval(args.model, args.adapter, args.prompt, args.multimodal)
     elif args.command == "fuse":
-        run_fuse(args.model, args.adapter, args.dest)
+        run_fuse(args.model, args.adapter, args.dest, args.multimodal)
     elif args.command == "gguf":
         run_gguf(args.base_model, args.model, args.dest, args.outtype)
     elif args.command == "clean":

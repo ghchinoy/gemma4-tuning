@@ -1,0 +1,36 @@
+digraph DecisionTree {
+    node [shape=box, style="filled,rounded", color="#1976d2", fillcolor="#1976d2", fontcolor=white, fontname="Helvetica"];
+    edge [fontname="Helvetica", fontsize=10, color="#1976d2"];
+
+    Start [label="Start:\nFine-tuned Gemma-4 Model", shape=ellipse, color="#00bcd4", fillcolor="#00bcd4", fontcolor=black];
+    Q1 [label="Deploying on Mobile?", shape=diamond, fillcolor="#bbdefb", color="#1976d2", fontcolor=black];
+    
+    // Path: Desktop
+    DesktopTarget [label="GGUF via Desktop\nllama-server", fillcolor="#4caf50", color="#4caf50", fontcolor=white];
+
+    // Path: Mobile
+    Q2 [label="Supporting Android?", shape=diamond, fillcolor="#bbdefb", color="#1976d2", fontcolor=black];
+
+    // Path: Android (Yes)
+    Q3 [label="Using Dynamic LoRAs?", shape=diamond, fillcolor="#bbdefb", color="#1976d2", fontcolor=black];
+    MobileGGUF [label="GGUF via llama.cpp / Swift\n(Heavy dynamic swaps)", fillcolor="#81c784", color="#81c784", fontcolor=black];
+    LiteRT [label="LiteRT-LM Flatbuffer (.bin)\n(Pre-merged / Static graph)", fillcolor="#4caf50", color="#4caf50", fontcolor=white];
+
+    // Path: iOS Only (No Android)
+    Q4 [label="Is Battery / Apple Neural Engine\n(ANE) Crucial?", shape=diamond, fillcolor="#bbdefb", color="#1976d2", fontcolor=black];
+    CoreML [label="Apple CoreML (.mlpackage)\n(ANE accelerated)", fillcolor="#4caf50", color="#4caf50", fontcolor=white];
+    MLXGGUF [label="MLX Swift or GGUF\n(GPU accelerated)", fillcolor="#81c784", color="#81c784", fontcolor=black];
+
+    Start -> Q1;
+    Q1 -> DesktopTarget [label="No"];
+    Q1 -> Q2 [label="Yes"];
+
+    Q2 -> Q3 [label="Yes"];
+    Q2 -> Q4 [label="No"];
+
+    Q3 -> MobileGGUF [label="Yes"];
+    Q3 -> LiteRT [label="No"];
+
+    Q4 -> CoreML [label="Yes"];
+    Q4 -> MLXGGUF [label="No"];
+}

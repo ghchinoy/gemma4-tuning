@@ -58,6 +58,12 @@ Quickly cleans out temporary training directories (like `adapters/` and `fused_m
 uv run mlxtune clean
 ```
 
+### 9. Multi-Format Mobile Export
+Compiles and quantizes your fine-tuned model into mobile-optimized runtimes (LiteRT-LM and native MLX formats) for completely offline sandboxed app execution.
+```bash
+uv run scripts/export_formats.py --help
+```
+
 ## MLXMonitor (Live Visual Dashboard)
 
 This repository also includes a native macOS Swift application called **MLXMonitor** that provides a real-time, interactive dashboard for your training runs. 
@@ -81,4 +87,9 @@ Once exported, you can serve your custom-trained model via the `llama-server`. T
 llama-server -m my-custom-model.gguf -c 4096 --port 8080
 ```
 
-For more details on the nuances of dataset selection, quantization, and scaling to the cloud, see the `docs/PIPELINE.md` file!
+## Reference Documentation & Tradeoffs
+
+To ensure your fine-tuning pipeline matches your target deployment architectures, consult our specialized guides:
+*   **Detailed Lifecycle Explanations:** See [`docs/PIPELINE.md`](docs/PIPELINE.md) for data selection, quantization, and cloud scale rules.
+*   **On-Device Mobile Deployments:** See [`docs/MOBILE_EXPORT.md`](docs/MOBILE_EXPORT.md) for our premium comparative analysis, memory footprints, battery constraints, and a complete **Decision Tree** for choosing GGUF vs. LiteRT-LM vs. MLX Swift.
+*   **Multimodal Models:** Check out [`docs/MULTIMODAL_PIPELINE.md`](docs/MULTIMODAL_PIPELINE.md) for Gemma 4 audio/vision training setups.

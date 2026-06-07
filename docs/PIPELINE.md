@@ -1,5 +1,7 @@
 # The MLX Fine-Tuning Pipeline: Concepts & Nuances
 
+*Note: If you are fine-tuning natively multimodal models (like Gemma 4) with Audio or Image datasets, please read the [Multimodal Pipeline Guide](MULTIMODAL_PIPELINE.md) first!*
+
 This document explains the "why" behind the steps in the `mlxtune` pipeline, providing crucial context for training AI models locally.
 
 ## 1. Datasets: Quality vs. Quantity
