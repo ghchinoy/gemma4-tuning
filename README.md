@@ -30,9 +30,14 @@ uv run mlxtune prep --dataset "yahma/alpaca-cleaned" --samples 1000
 
 ### 4. Train the Model (LoRA)
 Runs Low-Rank Adaptation (LoRA) fine-tuning on your dataset. This freezes the base model and only trains a tiny adapter, making it extremely memory efficient.
-```bash
-uv run mlxtune train --iters 200 --batch-size 2
-```
+*   **Standard Run:**
+    ```bash
+    uv run mlxtune train --iters 200 --batch-size 2
+    ```
+*   **Gemma 4 QAT Run (Enables conservative adapter configurations):**
+    ```bash
+    uv run mlxtune train --model "~/projects/gemma/google-gemma-4-E2B-it-qat-q4_0-unquantized" --qat --rank 8 --lora-layers 16
+    ```
 
 ### 5. Evaluate the Adapter
 Tests the trained adapter by applying it to the base model on the fly and generating a response.
@@ -48,9 +53,14 @@ uv run mlxtune fuse
 
 ### 7. Export to GGUF
 Packages the fused weights, the tokenizer, and chat templates into a single, quantized `.gguf` file using `llama.cpp` conversion scripts.
-```bash
-uv run mlxtune gguf --outtype q8_0
-```
+*   **Standard Export:**
+    ```bash
+    uv run mlxtune gguf --outtype q8_0
+    ```
+*   **Gemma 4 QAT Export (Strictly enforces `q4_0` to match QAT pre-conditioned parameters):**
+    ```bash
+    uv run mlxtune gguf --qat
+    ```
 
 ### 8. Clean Artifacts
 Quickly cleans out temporary training directories (like `adapters/` and `fused_model_dequantized/`) so you can run fresh experiments.
@@ -58,7 +68,14 @@ Quickly cleans out temporary training directories (like `adapters/` and `fused_m
 uv run mlxtune clean
 ```
 
-### 9. Multi-Format Mobile Export
+### 9. Benchmark Quantization Drift & Perplexity
+Programmatically evaluates the semantic "drift" introduced by compressing your model, comparing the high-precision reference outputs directly to the low-precision quantized GGUF outputs.
+```bash
+uv run mlxtune benchmark --reference-model "./fused_model_dequantized" --gguf-model "my-custom-model.gguf"
+```
+*Note: This command will automatically run Jaccard vocabulary similarity matching and output a complete tutorial on executing mathematical validation via `llama-perplexity`.*
+
+### 10. Multi-Format Mobile Export
 Compiles and quantizes your fine-tuned model into mobile-optimized runtimes (LiteRT-LM and native MLX formats) for completely offline sandboxed app execution.
 ```bash
 uv run scripts/export_formats.py --help
@@ -87,9 +104,36 @@ Once exported, you can serve your custom-trained model via the `llama-server`. T
 llama-server -m my-custom-model.gguf -c 4096 --port 8080
 ```
 
-## Reference Documentation & Tradeoffs
+## 🤖 Agent Purposes, Capabilities & Specialized Guides
 
-To ensure your fine-tuning pipeline matches your target deployment architectures, consult our specialized guides:
-*   **Detailed Lifecycle Explanations:** See [`docs/PIPELINE.md`](docs/PIPELINE.md) for data selection, quantization, and cloud scale rules.
-*   **On-Device Mobile Deployments:** See [`docs/MOBILE_EXPORT.md`](docs/MOBILE_EXPORT.md) for our premium comparative analysis, memory footprints, battery constraints, and a complete **Decision Tree** for choosing GGUF vs. LiteRT-LM vs. MLX Swift.
-*   **Multimodal Models:** Check out [`docs/MULTIMODAL_PIPELINE.md`](docs/MULTIMODAL_PIPELINE.md) for Gemma 4 audio/vision training setups.
+To maximize **didactic ease of use** and support automated AI coding assistants, the repository houses both comprehensive markdown documentation and structured AI "Agent Skills" (conforming to the [agentskills.io specification](https://agentskills.io/specification.md)). 
+
+Here is how you can leverage and map these resources based on your specific engineering or training goals:
+
+### 1. Standard LoRA Fine-Tuning
+*   **Purpose:** Fine-tuning base/instruction-tuned text models on conversational prompt-response data.
+*   **Detailed Guide:** [`docs/PIPELINE.md`](docs/PIPELINE.md) (covers dataset philosophies like LIMA vs. Alpaca, and basic LoRA parameters).
+*   **Agent Skill:** [`skills/gemma-fine-tuning/SKILL.md`](skills/gemma-fine-tuning/SKILL.md) — instructions for agents to prepare, train, monitor, and clean standard runs.
+
+### 2. Quantization-Aware Training (QAT) Alignment
+*   **Purpose:** Compiling high-fidelity models for edge/mobile devices using pre-conditioned QAT base models, avoiding the semantic accuracy drops introduced by Post-Training Quantization (PTQ).
+*   **Detailed Guide:** [`docs/PIPELINE.md#gemma-4-qat-quantization-aware-training-alignment`](docs/PIPELINE.md#L26) (concepts of QAT unquantized checks, strict `q4_0` GGUF alignment, and rank conservatism).
+*   **Agent Skill:** [`skills/gemma-qat-tuning/SKILL.md`](skills/gemma-qat-tuning/SKILL.md) — instructions for executing clean QAT runs with stable parameters, strict `q4_0` quantization, and drift benchmarking.
+
+### 3. Natively Multimodal Training (Vision & Audio)
+*   **Purpose:** Training models to receive interleaved text, raw audio, and image arrays in the new ChatML standard.
+*   **Detailed Guide:** [`docs/MULTIMODAL_PIPELINE.md`](docs/MULTIMODAL_PIPELINE.md) (interleaved ChatML format, `mlx-vlm` library integration, and audio conformer module targeting).
+*   **Agent Skill:** [`skills/gemma-multimodal-tuning/SKILL.md`](skills/gemma-multimodal-tuning/SKILL.md) — instructions for formatting content arrays, launching `--multimodal` training, and executing key-sanitized weights fusion.
+
+### 4. On-Device Mobile Compilation & Runtimes
+*   **Purpose:** Merging, converting, and packaging model checkpoints into sandboxed mobile apps (iOS & Android).
+*   **Detailed Guide:** [`docs/MOBILE_EXPORT.md`](docs/MOBILE_EXPORT.md) (performance matrices, battery/RAM tradeoffs, storage guidelines, and the **Mobile Export Decision Tree**).
+*   **Agent Skill:** [`skills/gemma-model-export/SKILL.md`](skills/gemma-model-export/SKILL.md) — instructions for compiling GGUF, LiteRT-LM (`.litertlm` package), or native MLX formats, and implementing safe sandbox dynamic-download onboarding flows.
+
+---
+
+## Servicing and Tracking Tools
+
+*   **Experiment Journal:** [`docs/EXPERIMENT_JOURNAL.md`](docs/EXPERIMENT_JOURNAL.md) — track hyperparameter configurations, GPU memory profiles, validation losses, and quantization drift metrics.
+*   **Upstream Friction Log:** [`docs/FRICTION_LOG.md`](docs/FRICTION_LOG.md) — check active workarounds for upstream bugs (e.g. Apple Metal uncatchable OOMs or MLX key-prefix mangling).
+*   **Real-time Monitoring:** Check out [`MLXMonitor/README.md`](MLXMonitor/README.md) to launch the native Swift charts dashboard for live training loss.

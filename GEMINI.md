@@ -15,6 +15,7 @@ We maintain a strict separation of concerns between the machine learning logic a
 1.  **The ML Pipeline (`src/gemmmma/cli.py`):** Written in Python, managed by `uv`. This is the "Easy Button." It wraps complex MLX and `llama.cpp` commands into simple, linear steps (prep, train, fuse, gguf).
 2.  **The Telemetry System (`training_log.jsonl`):** The Python pipeline must emit structured, self-documenting JSONL logs. This acts as the MLOps experiment tracker.
 3.  **The Monitor (`MLXMonitor/`):** Written in native Swift and SwiftUI. It reads the telemetry system to provide a real-time macOS dashboard. Native code is used here because it excels at native UI and charting, keeping the Python ML code free of heavy UI libraries.
+4.  **The Upstream Friction Log (`docs/FRICTION_LOG.md`):** Maintain a structured log tracking blocker and major severity issues encountered in upstream dependencies (e.g., Apple Metal, MLX, `llama.cpp`). This ensures reproducibility and provides concrete reports we can share with upstream maintainers or publish.
 
 ## 💻 Coding & Development Guidelines
 
@@ -42,6 +43,11 @@ Future scripts will need to gracefully handle `{"type": "image", "image": "path.
 ### 4. Tooling Constraints
 *   **Python:** Always use `uv` for dependency management and running scripts (`uv run ...`). Do not use `pip` directly.
 *   **Swift:** Keep the `MLXMonitor` isolated as an executable Swift Package. Avoid heavy third-party dependencies; rely on Apple's native frameworks (like `Charts` and `Combine`).
+
+### 5. Hardware Constraints & Upstream Failures
+*   **No `llama-cli` on Gemma 4:** Upstream builds of `llama-cli` contain a parser bug that enters an infinite CPU loop (pinning CPU at 100%) when loading Gemma 4 GGUF models. Never run GGUF inference/validation via `llama-cli` on this Mac; use Python-native `mlx_vlm` / `mlxtune` for local validation.
+*   **Apple Metal Driver OOM Workaround:** High unified memory pressure causes Apple Metal drivers to trigger uncatchable hard allocation crashes (Python process terminates with `[METAL] Command buffer execution failed`). Bypass this during memory-intensive loads/inference by prepending executions with the `MLX_GPU_DISABLE=1` shell prefix to force a safe CPU-bound swap/virtual memory fallback.
+*   **MLX Save Key-Sanitization Rule:** When saving fused weights using `save_safetensors` with `metadata={"format": "mlx"}`, the MLX loader skips automatic key prefix sanitization. You must map parameter keys in-memory to their exact, flat native leaf paths so they bind correctly on load, avoiding silent loading of zero/blank weights (which causes infinite `<pad>` outputs).
 
 ## 🤝 Interaction Protocol
 When the user asks "How do I do X?", first outline the conceptual steps and the tools required. Wait for confirmation, then implement the code, explaining the specific ML parameters (like LoRA rank, batch size, or learning rate) you chose and why.
