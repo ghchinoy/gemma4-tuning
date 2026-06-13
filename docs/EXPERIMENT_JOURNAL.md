@@ -4,6 +4,46 @@ This journal serves as an experiment tracker and MLOps log for training, fusing,
 
 ---
 
+## 🔬 Experiment ID: QAT-12B-ELDAMO-002
+*   **Date:** 2026-06-13
+*   **Base Model:** `google-gemma-4-12B-it-qat-q4_0-unquantized`
+*   **Hardware:** Apple Silicon Mac (Metal GPU)
+*   **Status:** 🟢 COMPLETED
+
+---
+
+### 🎛️ Hyperparameters
+
+| Parameter | Value | Rationale / Detail |
+| :--- | :--- | :--- |
+| **Iterations (`--iters`)** | `500` | Complete stable training steps. |
+| **Batch Size** | `2` | Optimized memory-aligned batch training count. |
+| **LoRA Rank (`--rank`)** | `16` | LoRA adapter width for linguistic grammar/lookups. |
+| **Target Layers** | `16` | Target boundary layer targeting. |
+| **Dataset** | `eldamo-elvish` | 16,726 ChatML pairs (15,053 Train / 1,673 Validation). |
+
+---
+
+### 📊 Evaluation & Results
+
+#### 1. Training Telemetry
+*   **Validation Loss at start:** `7.995`
+*   **Validation Loss at end:** `1.584`
+*   **Peak GPU Memory:** `25.32 GB`
+
+#### 2. Quantization Drift Analysis
+*   **Reference FP16 Response:** *[Awaiting evaluation]*
+*   **Quantized GGUF Response:** *[Awaiting evaluation]*
+*   **Jaccard Similarity Score:** *[Awaiting evaluation]*
+*   **Calculated Quantization Drift:** *[Awaiting evaluation]*
+
+---
+
+### 💡 Notes & Lessons Learned
+Full-dataset 500-iteration QAT tuning loop successfully drove validation loss from 7.995 down to 1.584 using Cosine Decay. Fusion and quantization to strict `q4_0` GGUF completed flawlessly. Copied instantly to the Mithlond application support path using APFS copy-on-write (`cp -c`). Ready for on-device inference validation and semantic similarity scoring.
+
+---
+
 ## 🔬 Experiment ID: QAT-12B-ELDAMO-001
 *   **Date:** 2026-06-13
 *   **Base Model:** `google-gemma-4-12B-it-qat-q4_0-unquantized`

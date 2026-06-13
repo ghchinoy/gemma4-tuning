@@ -64,5 +64,27 @@
       "gguf_response": null
     },
     "notes": "Successfully resolved Gemma 4 LoRA submodule naming mismatch. Descended loss steadily to 2.20."
+  },
+  "QAT-12B-ELDAMO-002": {
+    "date": "2026-06-13",
+    "model": "google-gemma-4-12B-it-qat-q4_0-unquantized",
+    "status": "COMPLETED",
+    "hyperparameters": {
+      "iters": 500,
+      "batch_size": 2,
+      "rank": 16,
+      "layers": 16,
+      "dataset": "eldamo-elvish"
+    },
+    "results": {
+      "val_loss_start": 7.995,
+      "val_loss_end": 1.584,
+      "peak_mem_gb": 25.32,
+      "jaccard_score": null,
+      "drift_score": null,
+      "ref_response": null,
+      "gguf_response": null
+    },
+    "notes": "Full-dataset 500-iteration QAT tuning loop on 16,726 ChatML-formatted Eldamo Elvish instruction pairs. Learning rate Cosine Decay successfully drove validation loss from 7.995 down to 1.584 without overfitting. Stably ran with 25.32 GB peak memory footprint on Apple Silicon. Fused model dequantized to FP16 and then quantized back to q4_0 using strict QAT-aligned parameter schemes to prevent post-training quantization drift. Successfully copied to the Mithlond local application support directory."
   }
 }
