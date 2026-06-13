@@ -4,6 +4,46 @@ This journal serves as an experiment tracker and MLOps log for training, fusing,
 
 ---
 
+## 🔬 Experiment ID: QAT-12B-ELDAMO-001
+*   **Date:** 2026-06-13
+*   **Base Model:** `google-gemma-4-12B-it-qat-q4_0-unquantized`
+*   **Hardware:** Apple Silicon Mac (Metal GPU)
+*   **Status:** 🟢 COMPLETED
+
+---
+
+### 🎛️ Hyperparameters
+
+| Parameter | Value | Rationale / Detail |
+| :--- | :--- | :--- |
+| **Iterations (`--iters`)** | `100` | Training steps. |
+| **Batch Size** | `1` | Batch training count. |
+| **LoRA Rank (`--rank`)** | `8` | LoRA adapter width. |
+| **Target Layers** | `8` | Frozen boundary layer targeting. |
+| **Dataset** | `eldamo-elvish` | Data source. |
+
+---
+
+### 📊 Evaluation & Results
+
+#### 1. Training Telemetry
+*   **Validation Loss at start:** `7.995`
+*   **Validation Loss at end:** `2.243`
+*   **Peak GPU Memory:** `24.97 GB`
+
+#### 2. Quantization Drift Analysis
+*   **Reference FP16 Response:** *[Awaiting execution]*
+*   **Quantized GGUF Response:** *[Awaiting execution]*
+*   **Jaccard Similarity Score:** `*[Awaiting execution]*`
+*   **Calculated Quantization Drift:** `*[Awaiting execution]*`
+
+---
+
+### 💡 Notes & Lessons Learned
+Successfully resolved Gemma 4 LoRA submodule naming mismatch. Descended loss steadily to 2.20.
+
+---
+
 ## 🔬 Experiment ID: QAT-DRYRUN-001
 *   **Date:** 2026-06-12
 *   **Base Model:** `google-gemma-4-E2B-it-qat-q4_0-unquantized`

@@ -42,5 +42,27 @@
       "gguf_response": "Quantization-Aware Training (QAT) is a technique used to reduce the model size and computational requirements of deep learning models, which is crucial for edge deployments where resources are often limited.\n\nThe core benefits of using QAT for edge deployments include:\n\n1. **Reduced Model Size:**"
     },
     "notes": "Second tuning iteration using a conservative learning rate (2e-6) from a clean initialization. Successfully prevented validation loss divergence and fully eliminated the repetitive output issue of Experiment 1, yielding highly coherent and fluent English text generation. Peak memory footprint remained stable at 12.43 GB."
+  },
+  "QAT-12B-ELDAMO-001": {
+    "date": "2026-06-13",
+    "model": "google-gemma-4-12B-it-qat-q4_0-unquantized",
+    "status": "COMPLETED",
+    "hyperparameters": {
+      "iters": 100,
+      "batch_size": 1,
+      "rank": 8,
+      "layers": 8,
+      "dataset": "eldamo-elvish"
+    },
+    "results": {
+      "val_loss_start": 7.995,
+      "val_loss_end": 2.243,
+      "peak_mem_gb": 24.97,
+      "jaccard_score": null,
+      "drift_score": null,
+      "ref_response": null,
+      "gguf_response": null
+    },
+    "notes": "Successfully resolved Gemma 4 LoRA submodule naming mismatch. Descended loss steadily to 2.20."
   }
 }

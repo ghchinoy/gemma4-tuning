@@ -149,9 +149,9 @@ num_layers: {lora_layers}
 learning_rate: {learning_rate}
 lora_parameters:
   rank: {rank}
-  alpha: {2 * rank}
+  scale: 20.0
   dropout: 0.0
-  keys: ["q_proj", "v_proj", "gate_proj", "down_proj", "up_proj"]
+  keys: ["self_attn.q_proj", "self_attn.v_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
 """
         with open("temp_lora_config.yaml", "w") as cf:
             cf.write(config_content)
