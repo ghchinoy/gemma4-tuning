@@ -138,7 +138,7 @@ def run_train(model_path, data_path, iters, batch_size, log_file="training_log.j
     else:
         # mlx_lm.lora requires a configuration file to specify custom LoRA parameters like rank.
         # We generate a temporary config on-the-fly to ensure standard-aligned execution.
-        print("==> Generating temporary LoRA YAML configuration...")
+        print("==> Generating temporary LoRA YAML configuration with Memory Optimizations...")
         config_content = f"""# Temporary LoRA Config for MLX
 model: "{model_path}"
 train: true
@@ -147,6 +147,8 @@ iters: {iters}
 batch_size: {batch_size}
 num_layers: {lora_layers}
 learning_rate: {learning_rate}
+grad_checkpoint: true
+clear_cache_threshold: 0.1
 lora_parameters:
   rank: {rank}
   scale: 20.0
