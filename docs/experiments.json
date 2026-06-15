@@ -86,5 +86,27 @@
       "gguf_response": null
     },
     "notes": "Full-dataset 500-iteration QAT tuning loop on 16,726 ChatML-formatted Eldamo Elvish instruction pairs. Learning rate Cosine Decay successfully drove validation loss from 7.995 down to 1.584 without overfitting. Stably ran with 25.32 GB peak memory footprint on Apple Silicon. Fused model dequantized to FP16 and then quantized back to q4_0 using strict QAT-aligned parameter schemes to prevent post-training quantization drift. Successfully copied to the Mithlond local application support directory."
+  },
+  "QAT-4B-ELDAMO-001": {
+    "date": "2026-06-14",
+    "model": "google-gemma-4-E4B-it-qat-q4_0-unquantized",
+    "status": "COMPLETED",
+    "hyperparameters": {
+      "iters": 100,
+      "batch_size": 1,
+      "rank": 8,
+      "layers": 8,
+      "dataset": "eldamo-combined"
+    },
+    "results": {
+      "val_loss_start": 4.137,
+      "val_loss_end": 2.13,
+      "peak_mem_gb": 17.922,
+      "jaccard_score": null,
+      "drift_score": null,
+      "ref_response": "This is a very specific word, and it is not a standard, common entry in the primary Quenya lexicons (like those compiled by Thomas Paun or Vinyard). This suggests it might be a highly descriptive, poetic, or constructed word.\\n\\nHowever, by breaking the word down into its likely morphemes (parts), we can determine its probable meaning based on Quenya grammar:\\n\\n### Etymological Breakdown\\n\\n1. **apa-**: This is the Quenya word for **\"water.\"**\\n2. **-quista**: This suffix is derived from a root that often relates to a state, condition, or quality. In this context, it functions as an adjective or a noun describing a state.\\n\\n### Probable Meaning\\n\\nBased on this structure, **\"apaquista\"** most likely means:\\n\\n* **\"One who is of the water\"**\\n* **\"Aquatic\"**\\n* **\"Watery\"**\\n* **\"A being associated with water\"**\\n\\nIn essence, it is a descriptive term for something or someone that is fundamentally connected to or defined by water.",
+      "gguf_response": "Not executable in llama.cpp (llama-server/llama-cli) due to the upstream Attention KV layer tensor loader bug: missing tensor \"blk.24.attn_k.weight\" in Gemma 4 E4B. Verified successful execution bypass using native MLX on the fused FP16 weights."
+    },
+    "notes": "Successful 100-iteration fine-tuning run of Gemma 4 E4B (4B Mobile QAT variant) on Apple GPU (Metal) using combined conversational QA and CoT phonetic derivation datasets. Stable convergence without out-of-memory errors."
   }
 }

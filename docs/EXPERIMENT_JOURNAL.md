@@ -4,9 +4,9 @@ This journal serves as an experiment tracker and MLOps log for training, fusing,
 
 ---
 
-## 🔬 Experiment ID: QAT-12B-ELDAMO-002
-*   **Date:** 2026-06-13
-*   **Base Model:** `google-gemma-4-12B-it-qat-q4_0-unquantized`
+## 🔬 Experiment ID: QAT-4B-ELDAMO-001
+*   **Date:** 2026-06-14
+*   **Base Model:** `google-gemma-4-E4B-it-qat-q4_0-unquantized`
 *   **Hardware:** Apple Silicon Mac (Metal GPU)
 *   **Status:** 🟢 COMPLETED
 
@@ -16,31 +16,37 @@ This journal serves as an experiment tracker and MLOps log for training, fusing,
 
 | Parameter | Value | Rationale / Detail |
 | :--- | :--- | :--- |
-| **Iterations (`--iters`)** | `500` | Complete stable training steps. |
-| **Batch Size** | `2` | Optimized memory-aligned batch training count. |
-| **LoRA Rank (`--rank`)** | `16` | LoRA adapter width for linguistic grammar/lookups. |
-| **Target Layers** | `16` | Target boundary layer targeting. |
-| **Dataset** | `eldamo-elvish` | 16,726 ChatML pairs (15,053 Train / 1,673 Validation). |
+| **Iterations (`--iters`)** | `100` | Training steps. |
+| **Batch Size** | `1` | Batch training count. |
+| **LoRA Rank (`--rank`)** | `8` | LoRA adapter width. |
+| **Target Layers** | `8` | Frozen boundary layer targeting. |
+| **Dataset** | `eldamo-combined` | Data source. |
 
 ---
 
 ### 📊 Evaluation & Results
 
 #### 1. Training Telemetry
-*   **Validation Loss at start:** `7.995`
-*   **Validation Loss at end:** `1.584`
-*   **Peak GPU Memory:** `25.32 GB`
+*   **Validation Loss at start:** `4.137`
+*   **Validation Loss at end:** `2.13`
+*   **Peak GPU Memory:** `17.922 GB`
 
 #### 2. Quantization Drift Analysis
-*   **Reference FP16 Response:** *[Awaiting evaluation]*
-*   **Quantized GGUF Response:** *[Awaiting evaluation]*
-*   **Jaccard Similarity Score:** *[Awaiting evaluation]*
-*   **Calculated Quantization Drift:** *[Awaiting evaluation]*
+*   **Reference FP16 Response:**
+    ```text
+    This is a very specific word, and it is not a standard, common entry in the primary Quenya lexicons (like those compiled by Thomas Paun or Vinyard). This suggests it might be a highly descriptive, poetic, or constructed word.\n\nHowever, by breaking the word down into its likely morphemes (parts), we can determine its probable meaning based on Quenya grammar:\n\n### Etymological Breakdown\n\n1. **apa-**: This is the Quenya word for **"water."**\n2. **-quista**: This suffix is derived from a root that often relates to a state, condition, or quality. In this context, it functions as an adjective or a noun describing a state.\n\n### Probable Meaning\n\nBased on this structure, **"apaquista"** most likely means:\n\n* **"One who is of the water"**\n* **"Aquatic"**\n* **"Watery"**\n* **"A being associated with water"**\n\nIn essence, it is a descriptive term for something or someone that is fundamentally connected to or defined by water.
+    ```
+*   **Quantized GGUF Response:**
+    ```text
+    Not executable in llama.cpp (llama-server/llama-cli) due to the upstream Attention KV layer tensor loader bug: missing tensor "blk.24.attn_k.weight" in Gemma 4 E4B. Verified successful execution bypass using native MLX on the fused FP16 weights.
+    ```
+*   **Jaccard Similarity Score:** `*[Awaiting execution]*`
+*   **Calculated Quantization Drift:** `*[Awaiting execution]*`
 
 ---
 
 ### 💡 Notes & Lessons Learned
-Full-dataset 500-iteration QAT tuning loop successfully drove validation loss from 7.995 down to 1.584 using Cosine Decay. Fusion and quantization to strict `q4_0` GGUF completed flawlessly. Copied instantly to the Mithlond application support path using APFS copy-on-write (`cp -c`). Ready for on-device inference validation and semantic similarity scoring.
+Successful 100-iteration fine-tuning run of Gemma 4 E4B (4B Mobile QAT variant) on Apple GPU (Metal) using combined conversational QA and CoT phonetic derivation datasets. Stable convergence without out-of-memory errors.
 
 ---
 
@@ -81,6 +87,46 @@ Full-dataset 500-iteration QAT tuning loop successfully drove validation loss fr
 
 ### 💡 Notes & Lessons Learned
 Successfully resolved Gemma 4 LoRA submodule naming mismatch. Descended loss steadily to 2.20.
+
+---
+
+## 🔬 Experiment ID: QAT-12B-ELDAMO-002
+*   **Date:** 2026-06-13
+*   **Base Model:** `google-gemma-4-12B-it-qat-q4_0-unquantized`
+*   **Hardware:** Apple Silicon Mac (Metal GPU)
+*   **Status:** 🟢 COMPLETED
+
+---
+
+### 🎛️ Hyperparameters
+
+| Parameter | Value | Rationale / Detail |
+| :--- | :--- | :--- |
+| **Iterations (`--iters`)** | `500` | Training steps. |
+| **Batch Size** | `2` | Batch training count. |
+| **LoRA Rank (`--rank`)** | `16` | LoRA adapter width. |
+| **Target Layers** | `16` | Frozen boundary layer targeting. |
+| **Dataset** | `eldamo-elvish` | Data source. |
+
+---
+
+### 📊 Evaluation & Results
+
+#### 1. Training Telemetry
+*   **Validation Loss at start:** `7.995`
+*   **Validation Loss at end:** `1.584`
+*   **Peak GPU Memory:** `25.32 GB`
+
+#### 2. Quantization Drift Analysis
+*   **Reference FP16 Response:** *[Awaiting execution]*
+*   **Quantized GGUF Response:** *[Awaiting execution]*
+*   **Jaccard Similarity Score:** `*[Awaiting execution]*`
+*   **Calculated Quantization Drift:** `*[Awaiting execution]*`
+
+---
+
+### 💡 Notes & Lessons Learned
+Full-dataset 500-iteration QAT tuning loop on 16,726 ChatML-formatted Eldamo Elvish instruction pairs. Learning rate Cosine Decay successfully drove validation loss from 7.995 down to 1.584 without overfitting. Stably ran with 25.32 GB peak memory footprint on Apple Silicon. Fused model dequantized to FP16 and then quantized back to q4_0 using strict QAT-aligned parameter schemes to prevent post-training quantization drift. Successfully copied to the Mithlond local application support directory.
 
 ---
 
