@@ -16,6 +16,8 @@ These entries are structured to be directly actionable for upstream maintainers 
 | **FL-004** | `litert-torch` (v0.9.1) | 🔶 **MAJOR** | 12B LiteRT-LM Export OOM (Hardcoded FP32 Load, No Offloading) | Ship 12B via GGUF q4_0 + MLX 4-bit; LiteRT-LM for E2B/E4B only |
 | **FL-005** | Our pipeline / `convert_hf_to_gguf.py` | 🔴 **BLOCKER** | Gemma 4 GGUF Built With Gemma 2 `tokenizer.model` (Unloadable) | Never copy a `tokenizer.model` the source checkpoint doesn't ship; verify vocab = 262144 |
 | **FL-006** | `mlx_lm` training (raw `text` data) | 🔶 **MAJOR** | LoRA Trained Without `<bos>` Doesn't Transfer to llama.cpp / HF on Gemma 4 E4B | Train with chat-template (`messages`) data, or prepend `<bos>` to raw text |
+| **FL-007** | `transformers` ≥ 5.6 / `convert_hf_to_gguf.py` | 🔶 **MAJOR** | Gemma 4 GGUF Conversion Fails With `KeyError: 'global_head_dim'` | Run the converter from `llama.cpp/.venv` with llama.cpp's pinned requirements |
+| **FL-008** | `mlx-lm` 0.31.2 / `mlx-vlm` 0.7 | 🔶 **MAJOR** | Gemma 4 Won't Load in `mlx_lm` 0.31.2 (KV-Shared Layers); mlx-vlm 0.7 LoRA API Change | Require `mlx-lm>=0.31.3`; multimodal fuse rewritten on mlx-tune + `LoRALinear.fuse` |
 
 ---
 
@@ -229,6 +231,44 @@ Confirmed by retraining with `<bos>` included in the text. That run passed end t
 - Prefer `messages` / chat-template training data for Gemma 4.
 - For raw-text data, prepend `<bos>` (or the tokenizer's `bos_token`) to each sample.
 - When comparing MLX and GGUF outputs, feed both the same tokens (`<bos>` included).
+
+---
+
+## 🔶 FL-007: Gemma 4 GGUF Conversion Fails With `KeyError: 'global_head_dim'`
+
+### 📝 Description
+After gemmma moved to mlx-vlm 0.7.3, which pulls in transformers 5.15, `mlxtune gguf` failed in llama.cpp's converter:
+```
+convert_hf_to_gguf.py failed (exit 1): KeyError: 'global_head_dim'
+```
+
+### 🔍 Root Cause Analysis
+`convert_hf_to_gguf.py` reads hyperparameters through `AutoConfig.from_pretrained(...).to_dict()`. Newer transformers' `Gemma4Config` consumes `global_head_dim` as a constructor default (`kwargs.pop("global_head_dim", 512)`) and no longer emits it in `to_dict()`. The converter (llama.cpp `e34f04215`) then indexes `hparams["global_head_dim"]` and fails. llama.cpp pins `transformers==5.5.1` in `requirements-convert_hf_to_gguf.txt`, where the key is still present. The merged model's `config.json` is identical to the base's, so the export itself isn't at fault.
+
+### 💡 Workaround
+Keep the converter in its own environment with llama.cpp's pinned requirements. Both `mlxtune gguf` and eldamo `compile_gguf.py` use `llama.cpp/.venv` automatically when it exists, or `$LLAMA_CPP_PYTHON`:
+```bash
+uv venv --python 3.12 llama.cpp/.venv
+uv pip install --python llama.cpp/.venv/bin/python \
+    -r llama.cpp/requirements/requirements-convert_hf_to_gguf.txt --index-strategy unsafe-best-match
+```
+
+---
+
+## 🔶 FL-008: Gemma 4 Won't Load in `mlx_lm` 0.31.2; mlx-vlm 0.7 Changed the LoRA API
+
+### 📝 Description
+- **mlx-lm 0.31.2:** loading a Gemma 4 E4B checkpoint as a text model failed with `Missing 54 parameters: language_model.model.layers.24.self_attn.k_proj.weight, ...`. The error is surfaced by mlx-tune as "Gemma 4 models are multimodal (VLM). Use FastVisionModel instead".
+- **mlx-vlm 0.7:** our inline multimodal fuse script failed with `'Model' object has no attribute 'q_proj'`. On the older mlx-vlm 0.4.4 it had already been failing, with `get_peft_model() got an unexpected keyword argument 'fine_tune_type'`.
+
+### 🔍 Root Cause Analysis
+- Gemma 4 E2B/E4B share K/V projections across the last `num_kv_shared_layers` layers, so the checkpoint has no `k_proj`/`v_proj` weights there. mlx-lm 0.31.2's `gemma4_text` still built them; 0.31.3 only creates them for layers with their own KV (`has_kv`).
+- mlx-vlm 0.7 replaced `LoRaLayer` (`.A`/`.B`/`.alpha`) with `LoRALinear` (`.lora_a`/`.lora_b`/`.scale`, with a `fuse()` method), and `apply_lora_layers` now resolves module paths from the root of the model.
+
+### 💡 Workaround
+- gemmma now requires `mlx-lm>=0.31.3` (mlx 0.32.2, mlx-vlm 0.7.3).
+- `mlxtune fuse --multimodal` is rewritten on mlx-tune: `FastVisionModel` + `load_adapter`, plus rebuilding the audio-tower LoRA and trained audio tensors from `--tune-audio-encoder` adapters (mlx-tune's `load_adapter` only rebuilds language-model LoRA). Each `LoRALinear` is then fused with `fuse(dequantize=True)`, and the weights are saved under the base checkpoint's key layout.
+- Verified: fused checkpoints reproduce the adapter model's transcriptions exactly, and language-model logits match (same top-1 token), for both LM-only and LM + audio-tower adapters.
 
 ---
 

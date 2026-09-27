@@ -60,11 +60,13 @@ uv run mlxtune fuse \
 Compile the fused 16-bit safetensors back into a quantized GGUF, enforcing `q4_0` via the `--qat` flag:
 ```bash
 uv run mlxtune gguf \
-  --base-model ./model/google-gemma-4-E2B-it-qat-q4_0-unquantized \
   --model ./fused_model_dequantized \
   --dest my-custom-model.gguf \
   --qat
 ```
+Or skip the fuse step: `--model <unquantized QAT base> --adapter ./adapters --qat`.
+Tokenizer files come only from the model itself; never copy in a `tokenizer.model` from another checkpoint (FL-005).
+Verify the result: `token_embd.weight` vocab must be 262144 for Gemma 4.
 
 ### 6. Benchmark Semantic Drift
 Evaluate the semantic "drift" introduced by low-precision compression. This compares high-precision reference outputs directly to the low-precision quantized GGUF outputs:

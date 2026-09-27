@@ -52,7 +52,13 @@ uv run mlxtune fuse
 ```
 
 ### 7. Export to GGUF
-Packages the fused weights, the tokenizer, and chat templates into a single, quantized `.gguf` file using `llama.cpp` conversion scripts.
+Exports to a single quantized `.gguf` via mlx-tune's `export_to_gguf` (llama.cpp `convert_hf_to_gguf.py` + `llama-quantize`).
+Uses the `llama.cpp/` checkout in this repo (or `$LLAMA_CPP_PATH` / `--llama-cpp`) and its own converter venv; one-time setup:
+```bash
+uv venv --python 3.12 llama.cpp/.venv
+uv pip install --python llama.cpp/.venv/bin/python \
+    -r llama.cpp/requirements/requirements-convert_hf_to_gguf.txt --index-strategy unsafe-best-match
+```
 *   **Standard Export:**
     ```bash
     uv run mlxtune gguf --outtype q8_0
@@ -60,6 +66,10 @@ Packages the fused weights, the tokenizer, and chat templates into a single, qua
 *   **Gemma 4 QAT Export (Strictly enforces `q4_0` to match QAT pre-conditioned parameters):**
     ```bash
     uv run mlxtune gguf --qat
+    ```
+*   **Straight from a base model + adapter (no separate fuse step):**
+    ```bash
+    uv run mlxtune gguf --model <base> --adapter ./adapters --qat
     ```
 
 ### 8. Clean Artifacts

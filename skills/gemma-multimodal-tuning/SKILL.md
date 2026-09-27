@@ -68,8 +68,10 @@ uv run mlxtune eval \
   --multimodal
 ```
 
-### 5. Multimodal Key-Sanitized Fusion
-Bake the LoRA weights into the multimodal base. The `mlxtune` CLI handles the manual key remapping internally:
+### 5. Multimodal Fusion
+Bake the LoRA weights into the multimodal base. `mlxtune fuse --multimodal` loads the base with mlx-tune's
+`FastVisionModel`, applies language-model LoRA and (for `--tune-audio-encoder` adapters) the audio-tower LoRA
+plus its trained tensors, fuses them dequantized, and saves under the base checkpoint's key layout:
 ```bash
 uv run mlxtune fuse \
   --model ./model \

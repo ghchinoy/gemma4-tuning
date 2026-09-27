@@ -2,6 +2,7 @@ import argparse
 import os
 import json
 import subprocess
+import sys
 import shutil
 from datasets import load_dataset
 from huggingface_hub import snapshot_download
@@ -497,212 +498,165 @@ def run_eval(model_path, adapter_path, prompt, multimodal=False):
     subprocess.run(cmd)
     subprocess.run(cmd)
 
+def _fuse_multimodal(model_path, adapter_path, save_path):
+    """Fuse a Gemma 4 (VLM / audio) LoRA into the base and save full-precision weights.
+
+    Loads the base with mlx-tune's FastVisionModel, applies the adapter with the
+    same LoRA layers training used (load_adapter), then replaces every LoRALinear
+    (language model and, if tuned, audio tower) with its dequantized fused Linear
+    via LoRALinear.fuse(dequantize=True). Weights are saved under the base
+    checkpoint's key layout (model.language_model.*, model.audio_tower.*, ...), and
+    the base's config/processor/tokenizer files are copied, so the output loads
+    like the original checkpoint.
+    """
+    import glob
+    import mlx.core as mx
+    from mlx.utils import tree_flatten, tree_unflatten
+    from mlx_tune import FastVisionModel
+
+    wrapper, processor = FastVisionModel.from_pretrained(model_path)
+    if adapter_path:
+        wrapper.load_adapter(adapter_path)
+    model = wrapper.model
+
+    if adapter_path:
+        # mlx-tune's load_adapter only rebuilds language-model LoRA. Adapters trained
+        # with --tune-audio-encoder also carry audio-tower LoRA (on ClippableLinear.linear)
+        # plus trained full tensors (audio clip bounds, per_dim_scale, embed_audio);
+        # rebuild/apply those here so they are not silently dropped.
+        from mlx_lm.tuner.lora import LoRALinear
+        saved = mx.load(os.path.join(adapter_path, "adapters.safetensors"))
+        with open(os.path.join(adapter_path, "adapter_config.json")) as f:
+            cfg = json.load(f)
+        lp = cfg.get("lora_parameters", {})
+        scale = float(lp.get("scale", cfg.get("alpha", 16.0) / max(cfg.get("rank", 8), 1)))
+        audio_lora = sorted({k[: -len(".lora_a")] for k in saved
+                             if k.startswith("audio_tower.") and k.endswith(".lora_a")})
+        for path in audio_lora:
+            parts = path.split(".")
+            parent = model
+            for part in parts[:-1]:
+                parent = parent[int(part)] if part.isdigit() else getattr(parent, part)
+            base = getattr(parent, parts[-1])
+            if type(base).__name__ != "LoRALinear":
+                lora_a = saved[path + ".lora_a"]
+                setattr(parent, parts[-1], LoRALinear.from_base(base, r=lora_a.shape[1], scale=scale))
+        extras = [(k, v) for k, v in saved.items()
+                  if k.startswith(("audio_tower.", "embed_audio.")) and not k.endswith((".lora_a", ".lora_b"))]
+        audio_lora_weights = [(k, v) for k, v in saved.items()
+                              if k.startswith("audio_tower.") and k.endswith((".lora_a", ".lora_b"))]
+        if audio_lora or extras:
+            model.load_weights(audio_lora_weights + extras, strict=False)
+            print(f"==> Audio tower: {len(audio_lora)} LoRA layers + {len(extras)} trained tensors applied")
+
+    fused = [(name, module.fuse(dequantize=True))
+             for name, module in model.named_modules()
+             if type(module).__name__ == "LoRALinear" and hasattr(module, "fuse")]
+    if adapter_path and not fused:
+        raise SystemExit(f"Error: no LoRA layers were applied from {adapter_path}; nothing to fuse.")
+    if fused:
+        model.update_modules(tree_unflatten(fused))
+        print(f"==> Fused {len(fused)} LoRA layers (dequantized)")
+
+    weights = {}
+    for key, value in tree_flatten(model.parameters()):
+        hf_key = "model." + key
+        hf_key = hf_key.replace("model.language_model.model.", "model.language_model.")
+        weights[hf_key] = value
+
+    os.makedirs(save_path, exist_ok=True)
+    mx.save_safetensors(os.path.join(save_path, "model.safetensors"), weights)
+    for pattern in ("*.json", "*.jinja", "tokenizer.model"):
+        for src in glob.glob(os.path.join(model_path, pattern)):
+            if os.path.basename(src) != "model.safetensors.index.json":
+                shutil.copy2(src, save_path)
+    print(f"==> Multimodal fusion complete: {len(weights)} tensors -> {save_path}")
+
+
 def run_fuse(model_path, adapter_path, save_path, multimodal=False):
     """
-    Permanently bakes the trained LoRA adapters into the base model.
-    Crucially, it uses --dequantize to convert the Apple-specific 4-bit MLX 
-    format back into standard 16-bit PyTorch tensors so llama.cpp can read it.
+    Permanently bakes the trained LoRA adapters into the base model and writes
+    full-precision (dequantized) HF-format weights, readable by llama.cpp and
+    mlx_lm convert.
     """
     print(f"==> Fusing LoRA adapters into base model (dequantizing for GGUF compatibility)...")
     if multimodal:
-        # mlx_vlm doesn't have a native fuse CLI yet, so we build the script inline
-        script = f"""
-import os
-from mlx_vlm.utils import load
-from mlx_vlm.trainer.utils import apply_lora_layers
-from mlx_vlm.trainer.lora import LoRaLayer
-from mlx.utils import tree_flatten
-import mlx.core as mx
-import mlx.nn as nn
-import json
-import shutil
+        _fuse_multimodal(model_path, adapter_path, save_path)
+        return
 
-print("Loading base multimodal model...")
-model, processor = load("{model_path}")
+    # Text models: mlx-tune load + load_adapter + save_pretrained_merged(merged_16bit)
+    # (fuses LoRA and dequantizes to full precision, ready for llama.cpp / mlx_lm convert).
+    from mlx_tune import FastLanguageModel
 
-print("Applying LoRA adapters...")
-model = apply_lora_layers(model, "{adapter_path}")
+    model, tokenizer = FastLanguageModel.from_pretrained(model_path)
+    if adapter_path:
+        model.load_adapter(adapter_path)
+    model.save_pretrained_merged(save_path, tokenizer, save_method="merged_16bit")
 
-print("Fusing weights...")
-model.eval()
+def _default_llama_cpp_path():
+    """$LLAMA_CPP_PATH, else the llama.cpp checkout at the gemmma repo root (if present)."""
+    env = os.environ.get("LLAMA_CPP_PATH")
+    if env:
+        return env
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidate = os.path.join(repo_root, "llama.cpp")
+    return candidate if os.path.isdir(candidate) else None
 
-# Manually fuse the LoRA layers into the linear base weights
-for i, layer in enumerate(model.language_model.model.layers):
-    for name, module in layer.named_modules():
-        if isinstance(module, LoRaLayer):
-            # Calculate the fused weight: base_weight + (B @ A) * scale
-            base_weight = module.original_layer.weight
-            lora_b = module.B
-            lora_a = module.A
-            scale = module.alpha
-            
-            # Dequantize if the base layer is quantized so we can add the LoRA math
-            if hasattr(module.original_layer, "scales"):
-                base_weight = mx.dequantize(
-                    module.original_layer.weight,
-                    module.original_layer.scales,
-                    module.original_layer.biases,
-                    module.original_layer.group_size,
-                    module.original_layer.bits
-                )
-                
-            # MLX weights are [out_features, in_features].
-            # A is [256, 8], B is [8, 1536]. 
-            # A @ B yields [256, 1536]. Base weight is [1536, 256].
-            # We transpose to match.
-            lora_update = (lora_a @ lora_b).T * scale
-            fused_weight = base_weight + lora_update
-            use_bias = "bias" in module.original_layer.parameters()
-            
-            # Replace the LoRA layer with a standard linear layer containing the fused weights
-            new_linear = nn.Linear(base_weight.shape[1], base_weight.shape[0], bias=use_bias)
-            new_linear.weight = fused_weight
-            
-            if use_bias:
-                new_linear.bias = module.original_layer.bias
-                
-            # Keep it quantized if requested (optional, but standard for fused export)
-            if hasattr(module.original_layer, "scales"):
-                new_linear = nn.QuantizedLinear.from_linear(
-                    new_linear,
-                    module.original_layer.group_size,
-                    module.original_layer.bits
-                )
-                
-            # Update the parent module
-            parent_name = ".".join(name.split(".")[:-1])
-            child_name = name.split(".")[-1]
-            
-            if parent_name == "":
-                setattr(layer, child_name, new_linear)
-            else:
-                parent = layer
-                for part in parent_name.split("."):
-                    parent = getattr(parent, part)
-                setattr(parent, child_name, new_linear)
-                
-            # Evaluate weights immediately to clear the lazy graph and prevent memory spikes
-            mx.eval(new_linear.weight)
-            if use_bias:
-                mx.eval(new_linear.bias)
 
-print("Saving fused model to {save_path}...")
-os.makedirs("{save_path}", exist_ok=True)
+def _converter_python(llama_cpp_path):
+    """Python for convert_hf_to_gguf.py: $LLAMA_CPP_PYTHON, else <llama.cpp>/.venv, else current.
 
-# Save the trainable (now fully fused) parameters with MLX format metadata and proper key prefixes
-flat_params = dict(tree_flatten(model.parameters()))
-mapped_params = {{}}
-for fk, v in flat_params.items():
-    if fk.startswith("audio_tower."):
-        mk = "model." + fk
-    elif fk.startswith("language_model.model."):
-        mk = fk.replace("language_model.model.", "model.language_model.")
-    elif fk.startswith("language_model."):
-        mk = fk.replace("language_model.", "model.language_model.")
-    else:
-        mk = "model." + fk
-    mapped_params[mk] = v
-
-mx.save_safetensors("{save_path}/model.safetensors", mapped_params, metadata={{"format": "mlx"}})
-
-# Copy processor and config files
-for file in os.listdir("{model_path}"):
-    if file.endswith(".json") or file.endswith(".jinja"):
-        shutil.copy2(os.path.join("{model_path}", file), "{save_path}")
-        
-print("Multimodal fusion complete!")
-"""
-        cmd = ["python", "-c", script]
-    else:
-        cmd = [
-            "python", "-m", "mlx_lm.fuse",
-            "--model", model_path,
-            "--adapter-path", adapter_path,
-            "--save-path", save_path,
-            "--dequantize"  # Required for clean llama.cpp conversion
-        ]
-    subprocess.run(cmd)
-
-def run_gguf(base_model_path, fused_model_path, output_path, outtype="q8_0", qat=False):
+    llama.cpp pins its converter deps (e.g. transformers==5.5.1); newer transformers
+    drop Gemma 4's default global_head_dim from the config and the converter fails.
+    Create it once with:
+      uv venv --python 3.12 llama.cpp/.venv
+      uv pip install --python llama.cpp/.venv/bin/python \\
+          -r llama.cpp/requirements/requirements-convert_hf_to_gguf.txt --index-strategy unsafe-best-match
     """
-    Converts the 16-bit fused MLX model into a single, quantized GGUF file.
-    This file can be executed instantly by llama.cpp and served to Go applications.
+    env = os.environ.get("LLAMA_CPP_PYTHON")
+    if env:
+        return env
+    if llama_cpp_path:
+        candidate = os.path.join(llama_cpp_path, ".venv", "bin", "python")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def run_gguf(model_path, output_path, outtype="q8_0", qat=False, adapter_path=None, llama_cpp_path=None):
     """
-    if qat:
-        if outtype != "q4_0":
-            print(f"==> [QAT Optimization] Overriding outtype '{outtype}' to 'q4_0' for QAT alignment.")
-            print("    Why? Gemma 4 QAT models were mathematically pre-conditioned during training")
-            print("    specifically for 4-bit 'q4_0' quantization parameters. Exporting to other types")
-            print("    (like q8_0 or q4_k_m) will bypass this alignment, resulting in higher accuracy loss.")
-            outtype = "q4_0"
+    Export a model to a single GGUF file via mlx-tune's llama.cpp pipeline
+    (fuse + dequantize -> convert_hf_to_gguf.py -> llama-quantize).
 
-    print(f"==> Exporting fused model to GGUF (type: {outtype})...")
-    
-    # 1. Copy tokenizer.model from base model
-    # MLX doesn't always carry the SentencePiece tokenizer forward, 
-    # but llama.cpp absolutely requires it to understand text.
-    tokenizer_src = os.path.join(base_model_path, "tokenizer.model")
-    tokenizer_dest = os.path.join(fused_model_path, "tokenizer.model")
-    if os.path.exists(tokenizer_src):
-        shutil.copy2(tokenizer_src, tokenizer_dest)
-        print("==> Copied tokenizer.model for conversion.")
+    model_path is either an already-fused model directory, or a base model
+    combined with adapter_path. Tokenizer files are taken only from model_path
+    (never copied in from elsewhere; see FL-005).
+    """
+    from mlx_tune import export_to_gguf, LlamaCppNotFoundError
 
-    # 2. Ensure llama.cpp conversion tools exist locally
-    llama_cpp_dir = "./llama.cpp"
-    if not os.path.exists(llama_cpp_dir):
-        print("==> Cloning llama.cpp repository for conversion tools...")
-        subprocess.run(["git", "clone", "https://github.com/ggerganov/llama.cpp.git"])
-    
-    # 3. Determine if we need to do a two-step quantization
-    native_types = {"f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"}
-    
-    script_path = os.path.join(llama_cpp_dir, "convert_hf_to_gguf.py")
-    
-    if outtype in native_types:
-        cmd = [
-            "python", script_path,
-            fused_model_path,
-            "--outfile", output_path,
-            "--outtype", outtype
-        ]
-        subprocess.run(cmd)
-    else:
-        # Two-step: convert to high-precision (f16) GGUF, then run llama-quantize
-        temp_f16_path = output_path + ".temp-f16.gguf"
-        print(f"==> Step 1: Converting to high-precision f16 GGUF ({temp_f16_path})...")
-        cmd_convert = [
-            "python", script_path,
-            fused_model_path,
-            "--outfile", temp_f16_path,
-            "--outtype", "f16"
-        ]
-        subprocess.run(cmd_convert)
-        
-        # Now quantize
-        quantize_bin = (
-            shutil.which("llama-quantize") or 
-            shutil.which("quantize") or 
-            "/opt/homebrew/bin/llama-quantize"
+    if qat and outtype != "q4_0":
+        print(f"==> [QAT Optimization] Overriding outtype '{outtype}' to 'q4_0' for QAT alignment.")
+        print("    Gemma 4 QAT weights are pre-conditioned for q4_0; other types re-round them.")
+
+    llama_cpp_path = llama_cpp_path or _default_llama_cpp_path()
+    converter_python = _converter_python(llama_cpp_path)
+    if converter_python is None:
+        print("==> Warning: no llama.cpp/.venv found; running the converter with this interpreter.")
+        print("    If conversion fails (e.g. KeyError: 'global_head_dim'), create the converter venv:")
+        print("    see _converter_python() in cli.py or docs/FRICTION_LOG.md FL-007.")
+    try:
+        export_to_gguf(
+            model_path,
+            output_path=output_path,
+            quantization=outtype,
+            adapter_path=adapter_path,
+            qat=qat,
+            llama_cpp_path=llama_cpp_path,
+            llama_cpp_python=converter_python,
         )
-        
-        if os.path.exists(temp_f16_path):
-            print(f"==> Step 2: Quantizing to low-precision '{outtype}' using {quantize_bin}...")
-            cmd_quantize = [
-                quantize_bin,
-                temp_f16_path,
-                output_path,
-                outtype
-            ]
-            subprocess.run(cmd_quantize)
-            
-            # Clean up temp file
-            try:
-                os.remove(temp_f16_path)
-                print(f"==> Cleaned up temporary f16 file: {temp_f16_path}")
-            except Exception as e:
-                print(f"Warning: Could not remove temporary f16 file: {e}")
-        else:
-            print("Error: Temporary f16 GGUF file was not generated. Quantization aborted.")
+    except LlamaCppNotFoundError as e:
+        print(f"Error: {e}")
+        raise SystemExit(1)
 
 def run_benchmark(reference_model_path, gguf_model_path, prompt, multimodal=False):
     """
@@ -1090,12 +1044,13 @@ def main():
     fuse_parser.add_argument("--multimodal", action="store_true", help="Use mlx_vlm for multimodal fusing")
 
     # 7. GGUF Export Command
-    gguf_parser = subparsers.add_parser("gguf", help="Convert fused model to GGUF")
-    gguf_parser.add_argument("--base-model", default="./model", help="Path to base model folder (for tokenizer)")
-    gguf_parser.add_argument("--model", default="./fused_model_dequantized", help="Path to fused model folder")
+    gguf_parser = subparsers.add_parser("gguf", help="Export a (fused, or base + adapter) model to GGUF via llama.cpp")
+    gguf_parser.add_argument("--model", default="./fused_model_dequantized", help="Fused model folder, or base model when --adapter is given")
+    gguf_parser.add_argument("--adapter", default=None, help="Optional LoRA adapter folder to fuse into --model before export")
     gguf_parser.add_argument("--dest", default="my-custom-model.gguf", help="Destination GGUF file path")
-    gguf_parser.add_argument("--outtype", default="q8_0", help="Quantization type for GGUF (e.g., q8_0, f16, q4_k_m)")
+    gguf_parser.add_argument("--outtype", default="q8_0", help="Quantization type for GGUF (e.g., q8_0, f16, q4_k_m, q4_0)")
     gguf_parser.add_argument("--qat", action="store_true", help="Enforce q4_0 quantization optimized for QAT models")
+    gguf_parser.add_argument("--llama-cpp", default=None, help="llama.cpp checkout (default: $LLAMA_CPP_PATH, else ./llama.cpp in this repo)")
 
     # 8. Clean Command
     clean_parser = subparsers.add_parser("clean", help="Clean up training artifacts to start fresh")
@@ -1140,7 +1095,7 @@ def main():
     elif args.command == "fuse":
         run_fuse(args.model, args.adapter, args.dest, args.multimodal)
     elif args.command == "gguf":
-        run_gguf(args.base_model, args.model, args.dest, args.outtype, args.qat)
+        run_gguf(args.model, args.dest, args.outtype, args.qat, adapter_path=args.adapter, llama_cpp_path=args.llama_cpp)
     elif args.command == "clean":
         run_clean()
     elif args.command == "benchmark":
