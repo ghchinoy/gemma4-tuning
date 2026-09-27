@@ -7,13 +7,14 @@ name = "gemmmma"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "datasets>=2.19.0,<4.0.0",
     "gguf>=0.18.0",
     "huggingface-hub>=1.10.1",
-    "mlx-lm>=0.31.2",
-    "mlx-tune>=0.6.0",
+    "mlx-lm>=0.31.3",
+    # pinned to fork until ARahim3/mlx-tune#23 (llama.cpp GGUF export) is released
+    "mlx-tune @ git+https://github.com/ghchinoy/mlx-tune@8ea3df2",
     "mlx-vlm>=0.1.0",
     "soundfile",
     "torch>=2.11.0",
@@ -23,3 +24,6 @@ dependencies = [
 [project.scripts]
 mlxtune = "gemmmma.cli:main"
 
+
+[tool.hatch.metadata]
+allow-direct-references = true
