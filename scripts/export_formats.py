@@ -1,15 +1,9 @@
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "torch>=2.0.0",
-#     "transformers>=4.38.0",
-#     "peft>=0.9.0",
-#     "mlx-lm>=0.10.0",
-#     "huggingface-hub>=0.22.0",
-#     "gguf>=0.18.0",
-#     "safetensors>=0.4.0",
-# ]
-# ///
+"""
+Multi-format export: GGUF (llama.cpp), LiteRT-LM (.litertlm) and MLX.
+
+Runs in the gemmma project environment (`uv run scripts/export_formats.py ...`).
+GGUF and MLX go through the same mlx-tune code paths as `mlxtune gguf` / `mlxtune fuse`.
+"""
 
 import os
 import sys
@@ -105,74 +99,21 @@ def merge_lora_weights(base_model_path, adapter_path, merged_output_path):
         sys.exit(1)
 
 
-def handle_gguf_export(base_model, adapter, output_gguf, outtype="q4_k_m"):
+def handle_gguf_export(base_model, adapter, output_gguf, outtype="q4_k_m", qat=False):
     """
-    Handles GGUF compilation. Re-uses mlx dequantization/fusion to construct GGUF.
+    GGUF compilation via mlx-tune (same code path as `mlxtune gguf`):
+    fuse + dequantize -> llama.cpp convert_hf_to_gguf.py -> llama-quantize.
+    Tokenizer files come only from the base model (never copied in from elsewhere).
     """
     print_banner("Target: Compiling Fused GGUF Model")
-    temp_fused_dir = "./temp_fused_for_gguf"
-    
-    # 1. Fuse base model and adapter dequantizing to 16bit
-    print("==> Step 1: Dequantizing and fusing weights via mlx_lm.fuse...")
-    if os.path.exists(temp_fused_dir):
-        shutil.rmtree(temp_fused_dir)
-        
-    cmd_fuse = [
-        "python", "-m", "mlx_lm.fuse",
-        "--model", base_model,
-        "--adapter-path", adapter,
-        "--save-path", temp_fused_dir,
-        "--dequantize"
-    ]
-    
-    try:
-        subprocess.run(cmd_fuse, check=True)
-        print_success("Dequantized fusion complete.")
-    except subprocess.CalledProcessError as e:
-        print_error(f"Dequantized fusion failed: {e}")
-        sys.exit(1)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from gemmmma.cli import run_gguf
 
-    # 2. Copy tokenizer.model from base model
-    vocab_src = Path(base_model) / "tokenizer.model"
-    vocab_dst = Path(temp_fused_dir) / "tokenizer.model"
-    if vocab_src.exists():
-        shutil.copy2(vocab_src, vocab_dst)
-        print("==> Copied tokenizer.model for GGUF parsing.")
-
-    # 3. Clone or resolve llama.cpp
-    llama_cpp_dir = Path("./llama.cpp")
-    if not llama_cpp_dir.exists():
-        print("==> llama.cpp utility directory not found. Cloning helper tool repo...")
-        try:
-            subprocess.run(["git", "clone", "https://github.com/ggerganov/llama.cpp.git"], check=True)
-        except Exception as e:
-            print_error(f"Failed to clone llama.cpp: {e}")
-            sys.exit(1)
-
-    # 4. Run conversion script
-    convert_script = llama_cpp_dir / "convert_hf_to_gguf.py"
-    if not convert_script.exists():
-        print_error(f"Could not find convert_hf_to_gguf.py script inside {llama_cpp_dir}")
-        sys.exit(1)
-
-    print("\n==> Step 2: Compiling Safetensors to GGUF format...")
-    cmd_convert = [
-        "python", str(convert_script),
-        temp_fused_dir,
-        "--outfile", output_gguf,
-        "--outtype", outtype
-    ]
-    
-    try:
-        subprocess.run(cmd_convert, check=True)
-        print_success(f"GGUF compiled successfully at: {output_gguf}")
-    except subprocess.CalledProcessError as e:
-        print_error(f"GGUF compilation script failed: {e}")
-        sys.exit(1)
-    finally:
-        # Clean up temporary fused folder
-        if os.path.exists(temp_fused_dir):
-            shutil.rmtree(temp_fused_dir)
+    adapter_path = adapter if adapter and os.path.exists(adapter) else None
+    if adapter and not adapter_path:
+        print_warning(f"Adapter path '{adapter}' not found; exporting the base model only.")
+    run_gguf(base_model, output_gguf, outtype, qat, adapter_path=adapter_path)
+    print_success(f"GGUF compiled successfully at: {output_gguf}")
 
 
 def handle_litert_export(base_model, adapter, output_dir, prefused_path=None):
@@ -221,21 +162,12 @@ def handle_litert_export(base_model, adapter, output_dir, prefused_path=None):
     ]
 
     if not litert_installed:
-        print_warning("The 'litert-torch' package is not installed in the active environment.")
-        print("To run the conversion, we will attempt to install it in this subprocess.")
-        print("Alternatively, you can run: pip install litert-torch torch transformers")
-        
-        try:
-            # We install litert-torch and other prerequisites
-            subprocess.run([sys.executable, "-m", "pip", "install", "litert-torch", "torch", "transformers"], check=True)
-            litert_installed = True
-        except Exception as e:
-            print_error(f"Failed to auto-install litert-torch: {e}")
-            print("\nPlease install litert-torch manually and run the command again:")
-            print(f"  {BLUE}pip install litert-torch torch transformers{RESET}")
-            print(f"Then execute the compiled command directly:")
-            print(f"  {BLUE}{' '.join(cmd_convert)}{RESET}")
-            sys.exit(1)
+        print_error("The 'litert-torch' package is not installed in this environment.")
+        print("LiteRT export is kept out of the default dependencies (it pulls a large torch stack).")
+        print("Run it in an environment that has it, e.g. eldamo-tune's scripts/compile_litert.py,")
+        print(f"or: {BLUE}uv run --with litert-torch scripts/export_formats.py litert ...{RESET}")
+        print("Note: 12B models need >90GB RAM for LiteRT export (FRICTION_LOG FL-004).")
+        sys.exit(1)
 
     print(f"Running command: {' '.join(cmd_convert)}")
     try:
@@ -253,30 +185,25 @@ def handle_litert_export(base_model, adapter, output_dir, prefused_path=None):
 
 def handle_mlx_export(base_model, adapter, output_dir):
     """
-    Fuses the model and exports it as a clean, standard MLX-LM compatible
-    directory with safetensors and config parameters.
+    Fuses the adapter into the base with mlx-tune and writes a standard MLX-LM
+    directory (safetensors + config). Like `mlx_lm.fuse` without --dequantize, a
+    quantized base stays quantized; an unquantized QAT base stays full precision
+    (quantize it afterwards with `mlx_lm convert -q` if needed).
     """
     print_banner("Target: Compiling Standard MLX Format")
-    
+    from mlx_tune import FastLanguageModel
+
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
-        
-    cmd_fuse = [
-        "python", "-m", "mlx_lm.fuse",
-        "--model", base_model,
-        "--adapter-path", adapter,
-        "--save-path", output_dir
-    ]
-    
-    print("==> Compiling weights using mlx_lm.fuse...")
-    try:
-        subprocess.run(cmd_fuse, check=True)
-        print_success(f"MLX Model compiled successfully at: {output_dir}")
-        print("This directory can be directly imported using `mlx_lm` in Python")
-        print("or imported natively in Swift on iOS using the mlx-swift library!")
-    except subprocess.CalledProcessError as e:
-        print_error(f"MLX compilation failed: {e}")
-        sys.exit(1)
+    model, tokenizer = FastLanguageModel.from_pretrained(base_model)
+    if adapter and os.path.exists(adapter):
+        model.load_adapter(adapter)
+    else:
+        print_warning(f"Adapter path '{adapter}' not found; exporting the base model only.")
+    model.save_pretrained_merged(output_dir, tokenizer, save_method="merged_4bit")
+    print_success(f"MLX Model compiled successfully at: {output_dir}")
+    print("This directory can be directly imported using `mlx_lm` in Python")
+    print("or imported natively in Swift on iOS using the mlx-swift library!")
 
 
 def main():
@@ -306,7 +233,8 @@ Examples:
     # 1. GGUF Subparser
     parser_gguf = subparsers.add_parser("gguf", parents=[parent_parser], help="Export fused model to GGUF (llama.cpp)")
     parser_gguf.add_argument("--dest", default="my-custom-model.gguf", help="Output GGUF file path")
-    parser_gguf.add_argument("--outtype", default="q4_k_m", choices=["q4_k_m", "q8_0", "f16"], help="GGUF Quantization type")
+    parser_gguf.add_argument("--outtype", default="q4_k_m", help="GGUF quantization type (q4_k_m, q4_0, q8_0, f16, ...)")
+    parser_gguf.add_argument("--qat", action="store_true", help="Enforce q4_0 for Gemma QAT checkpoints")
 
     # 2. LiteRT-LM Subparser
     parser_litert = subparsers.add_parser("litert", parents=[parent_parser], help="Export merged model to LiteRT-LM Flatbuffer")
@@ -320,7 +248,7 @@ Examples:
     args = parser.parse_args()
 
     if args.target == "gguf":
-        handle_gguf_export(args.base, args.adapter, args.dest, args.outtype)
+        handle_gguf_export(args.base, args.adapter, args.dest, args.outtype, args.qat)
     elif args.target == "litert":
         handle_litert_export(args.base, args.adapter, args.dest, args.prefused)
     elif args.target == "mlx":

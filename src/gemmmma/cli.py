@@ -674,25 +674,30 @@ def run_benchmark(reference_model_path, gguf_model_path, prompt, multimodal=Fals
     print(f"Quantized GGUF Model:   {gguf_model_path}")
     print(f"Evaluation Prompt:      '{prompt}'\n")
 
-    # 1. Run inference on high-precision reference model using MLX
+    # 1. Run inference on high-precision reference model using MLX.
+    # Both sides use the model's own chat template and greedy decoding, so any
+    # difference comes from quantization, not from prompting or sampling.
     print("==> Step 1: Generating high-precision FP16 reference completion using MLX...")
     ref_response = ""
-    
+    formatted_prompt = ""
+
     try:
         if multimodal:
             from mlx_vlm import load as load_vlm, generate as generate_vlm
             model, processor = load_vlm(reference_model_path)
-            # Standard simple prompt formatting
-            formatted_prompt = f"User: {prompt}\nAssistant:"
-            res = generate_vlm(model, processor, prompt=formatted_prompt, max_tokens=150, verbose=False)
-            ref_response = res.text if hasattr(res, "text") else res
+            tokenizer = getattr(processor, "tokenizer", processor)
+            formatted_prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
+            res = generate_vlm(model, processor, prompt=formatted_prompt, max_tokens=150,
+                               temperature=0.0, verbose=False)
         else:
             from mlx_lm import load as load_lm, generate as generate_lm
             model, tokenizer = load_lm(reference_model_path)
-            formatted_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+            formatted_prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
             res = generate_lm(model, tokenizer, prompt=formatted_prompt, max_tokens=150, verbose=False)
-            ref_response = res.text if hasattr(res, "text") else res
-        
+        ref_response = res.text if hasattr(res, "text") else res
+
         print("\n--- Reference FP16 Output ---")
         print(ref_response.strip())
         print("-" * 30 + "\n")
@@ -701,38 +706,41 @@ def run_benchmark(reference_model_path, gguf_model_path, prompt, multimodal=Fals
         print("Please ensure the reference model has been fused and saved to the specified directory.")
         return
 
-    # 2. Run inference on quantized GGUF model using llama-cli
-    print("==> Step 2: Generating low-precision quantized completion using llama-cli...")
+    # 2. Run inference on the quantized GGUF with llama-completion (non-interactive).
+    # Not llama-cli: in current llama.cpp it stays in its interactive prompt loop even
+    # with -no-cnv and never exits when run from a script (see FL-001).
+    print("==> Step 2: Generating low-precision quantized completion using llama-completion...")
     gguf_response = ""
-    
-    # Locate llama-cli
-    llama_cli_path = shutil.which("llama-cli") or shutil.which("llama-main") or "/opt/homebrew/bin/llama-cli"
-    if not os.path.exists(llama_cli_path) and not shutil.which("llama-cli"):
-        print("Warning: Could not find 'llama-cli' in your PATH.")
-        print("Please ensure you have run 'brew install llama.cpp' or compiled llama.cpp locally.")
+    llama_completion = shutil.which("llama-completion")
+    if not llama_completion:
+        print("Warning: Could not find 'llama-completion' in your PATH.")
+        print("Please ensure you have run 'brew install llama.cpp' or built llama.cpp locally.")
         print("Skipping GGUF generation. Displaying educational guide instead...\n")
     else:
-        cmd = [
-            llama_cli_path,
-            "-m", gguf_model_path,
-            "-p", f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-            "-n", "150",
-            "--quiet"
-        ]
+        import tempfile
+        # llama.cpp adds <bos> itself; strip the template's copy so tokens match MLX.
+        gguf_prompt = formatted_prompt[len("<bos>"):] if formatted_prompt.startswith("<bos>") else formatted_prompt
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as pf:
+            pf.write(gguf_prompt)
+            prompt_file = pf.name
+        # -bf (binary file): -f strips the trailing newline after "<|turn>model", so
+        # the GGUF would see one token fewer than MLX.
+        cmd = [llama_completion, "-m", gguf_model_path, "-bf", prompt_file, "-n", "150",
+               "--temp", "0", "-no-cnv", "--no-display-prompt", "-ngl", "99"]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            gguf_response = result.stdout.strip()
-            # Clean up the output to exclude the prompt if llama-cli prints it
-            prompt_marker = "<|im_start|>assistant\n"
-            if prompt_marker in gguf_response:
-                gguf_response = gguf_response.split(prompt_marker)[-1]
-            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                                    stdin=subprocess.DEVNULL, timeout=600)
+            gguf_response = result.stdout.replace("[end of text]", "").strip()
             print("\n--- Quantized GGUF Output ---")
-            print(gguf_response.strip())
+            print(gguf_response)
             print("-" * 30 + "\n")
+        except subprocess.TimeoutExpired:
+            print("Error: llama-completion timed out after 600s.\n")
         except Exception as e:
-            print(f"Error running llama-cli: {e}")
+            print(f"Error running llama-completion: {e}")
             print("This could be due to model configuration or GGUF path issues.\n")
+        finally:
+            os.remove(prompt_file)
 
     # 3. Calculate Quantization Drift using Jaccard Similarity on word level
     if ref_response and gguf_response:
