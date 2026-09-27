@@ -1,7 +1,7 @@
 ---
 name: gemma-fine-tuning
 description: Guides agents on preparing datasets, running parameter-efficient LoRA fine-tuning, and tracking telemetry metrics using the mlxtune CLI on Apple Silicon. Use when an agent wants to fine-tune standard Gemma 4 base models on text instructions.
-compatibility: Requires Python 3.14+, uv, and Apple Silicon Mac
+compatibility: Requires Python 3.12 (uv), and Apple Silicon Mac
 ---
 
 # Gemma 4 LoRA Fine-Tuning Skill

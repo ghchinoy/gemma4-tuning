@@ -1,7 +1,7 @@
 ---
 name: gemma-multimodal-tuning
 description: Guides agents on preparing multimodal datasets in interleaved ChatML format, executing audio/vision fine-tuning with mlx-vlm, targeting specific layers, and performing key-sanitized weights fusion to avoid silent blank weights loading.
-compatibility: Requires Python 3.14+, uv, Apple Silicon, and mlx-vlm
+compatibility: Requires Python 3.12 (uv), Apple Silicon, and mlx-vlm
 ---
 
 # Gemma 4 Multimodal (Audio & Vision) Tuning Skill
@@ -19,18 +19,19 @@ Fine-tuning a multimodal network requires routing raw audio waveforms or image g
         {
           "role": "user",
           "content": [
-            {"type": "audio", "audio": "data/audio/speaker_1.wav"},
+            {"type": "audio", "audio": "/abs/path/to/data_audio/wavs/speaker_1.wav"},
             {"type": "text", "text": "Transcribe this audio."}
           ]
         }
       ]
     }
     ```
-2.  **Audio File Standards:** Stick to standard `16kHz` mono `.wav` files. This completely eliminates expensive real-time resampling CPU overhead during high-speed training loops.
+2.  **Audio File Standards:** Use **absolute paths** to the audio files (bare filenames fail in the collator). Stick to standard `16kHz` mono `.wav` files. This completely eliminates expensive real-time resampling CPU overhead during high-speed training loops.
 3.  **Strategic Target Modules:**
     *   **Language Model Only:** Attach LoRA adapters to the Language Model attention projection layers (e.g., `q_proj`, `v_proj`). Best for learning style, dialect, and formatting constraints.
-    *   **Audio/Vision Encoder Only:** Attach LoRA adapters directly to the encoder layers (e.g., `ConformerBlocks` inside the audio tower). Required when introducing entirely new acoustic conditions, accents, or specific environments.
-4.  **Weight Key-Sanitization on Save:** MLX skips automatic key sanitization when saving fused weights with `save_safetensors` and `metadata={"format": "mlx"}`. You MUST flat-map in-memory parameter keys to exact leaf paths (e.g., remapping `language_model.model.layers` to `model.language_model.layers`) to avoid silent zero/blank weight loads resulting in infinite `<pad>` outputs.
+    *   **Language Model + Audio Encoder (`--tune-audio-encoder`):** Also attaches LoRA to the audio tower's Conformer attention layers. Worth it for new acoustic conditions, accents or environments; on a single-domain ASR task (MInDS-14 banking) it cost +35% memory and 3.6x time for a small loss gain (see `docs/EXPERIMENT_JOURNAL.md`).
+4.  **Fusing:** Use `mlxtune fuse --multimodal`, never a hand-rolled `save_safetensors`. It saves in the base checkpoint's key layout and carries audio-tower LoRA across. Hand-saving with `metadata={"format": "mlx"}` and non-leaf keys silently loads blank weights (infinite `<pad>`, FL-002).
+5.  **Export limits:** A GGUF holds the text model only (audio/vision need a separate llama.cpp `mmproj` file). Raw-text (non-chat) training data needs a leading `<bos>` (FL-006).
 
 ---
 
@@ -52,11 +53,12 @@ uv run mlxtune train \
   --data ./data_audio \
   --multimodal \
   --iters 200 \
-  --batch-size 2 \
+  --batch-size 1 \
   --rank 8 \
   --lr 1e-5
 ```
-*   Add `--tune-audio-encoder` if you want to apply LoRA layers to the audio tower conformer layers rather than language projections.
+*   Audio training uses batch size 1 (the collator processes one audio sample at a time).
+*   Add `--tune-audio-encoder` to also apply LoRA to the audio tower's Conformer attention layers (in addition to the language model).
 
 ### 4. Evaluate Multimodal Adapters
 Evaluate the trained multimodal adapter by passing a prompt and the `--multimodal` option:
@@ -87,4 +89,6 @@ uv run mlxtune fuse \
 *   **Apple Metal Driver OOM Crashes:**
     Processing audio/image frames consumes highly variable GPU memory. If a training run triggers an uncatchable Metal driver memory crash (`Command buffer execution failed`), reduce `--batch-size` to `1` and reduce targeted layers.
 *   **Infinite Pad/Blank Outputs:**
-    If the fused model produces repetitive or endless `<pad>` tokens on inference, the weights saved in the safetensors file are not correctly prefix-mapped. Ensure your fusion script flat-maps the `flat_params` keys precisely before saving.
+    If a fused model produces endless `<pad>` tokens, the weights were saved with the wrong keys and loaded as blanks (FL-002). Re-fuse with `mlxtune fuse --multimodal` rather than a custom script.
+*   **Adapter Loads But Fuse Changes Nothing:**
+    `mlxtune fuse --multimodal` stops if no LoRA layers were applied. Check the adapter directory contains `adapters.safetensors` + `adapter_config.json` from `mlxtune train --multimodal`.

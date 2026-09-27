@@ -1,7 +1,7 @@
 ---
 name: gemma-qat-tuning
 description: Guides agents on fine-tuning Gemma 4 Quantization-Aware Training (QAT) unquantized checkpoints, maintaining mathematical alignment during LoRA, and exporting to GGUF using strict q4_0 parameters to avoid post-training quantization drift on edge devices.
-compatibility: Requires Python 3.14+, uv, Apple Silicon, and Metal GPU
+compatibility: Requires Python 3.12 (uv), Apple Silicon, and Metal GPU
 ---
 
 # Gemma 4 QAT Alignment and Tuning Skill

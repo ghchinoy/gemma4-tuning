@@ -46,7 +46,7 @@ To fine-tune the model to understand a specific speaker's tone, or to transcribe
 Our current Python pipeline uses `mlx-lm`, which expects flat text. To support the new architecture, we need to make the following architectural shifts:
 
 ### A. Switch to `mlx-vlm`
-Instead of using `mlx_lm.lora`, our pipeline must invoke `mlx_vlm.lora` (or its equivalent training loop). `mlx-vlm` is Apple's library explicitly designed to handle the heavy lifting of routing audio/image tensors through the Vision/Audio encoders before passing the embeddings to the language model.
+Text-only models train through `mlx-lm`. Multimodal models need `mlx-vlm`, which routes audio/image tensors through the Vision/Audio encoders before passing the embeddings to the language model. `mlxtune train --multimodal` drives this through mlx-tune's `FastVisionModel` (it applies the LoRA layers and builds batches from the interleaved content blocks), while gemmma's own loop keeps streaming telemetry to `training_log.jsonl`.
 
 ### B. Updating `format_row`
 The dataset parsing logic in our CLI needs to recursively check for `"type"` keys. 
@@ -62,18 +62,18 @@ For multimodal fine-tuning, you have a strategic choice:
 *   **Tune the Language Model Only:** Freeze the audio encoder, and only attach LoRA adapters to the language model. The model will learn to *speak* differently based on what it hears.
 *   **Tune the Audio Encoder (Multimodal LoRA):** Attach LoRA adapters to the `ConformerBlocks` inside the audio encoder. This is necessary if you are teaching the model to understand a completely new language, a heavy accent, or specific acoustic environments (like radio static) that it wasn't originally trained on.
 
-We will update the `gemmmma` CLI arguments to allow users to specify `--tune-audio-encoder` or `--tune-language-model`.
+`mlxtune train --multimodal` tunes the language model by default; add `--tune-audio-encoder` to also attach LoRA to the audio tower. Measured on MInDS-14 banking ASR (E2B, 50 iterations): the audio tower adds ~35% memory (15.5 → 21.0GB) and ~3.6x time for a small loss gain, so reserve it for real acoustic domain shifts (see `docs/EXPERIMENT_JOURNAL.md`).
 
 ## 3. Telemetry & The `MLXMonitor`
 
 Because processing raw audio waveforms consumes significantly more GPU memory than text tokens, our telemetry system (`training_log.jsonl`) needs to track memory spikes closely.
 
-When training with audio, batch sizes usually need to drop from `4` or `8` down to `1` or `2` to avoid `Out of Memory` (OOM) errors on Mac. The Swift `MLXMonitor` dashboard should be updated to highlight `peak_memory` distinctly when `multimodal=True` is detected in the config event.
+Audio training runs at batch size 1 (the collator processes one audio sample at a time); the `config` event records `multimodal: true`, and each `train` event carries `peak_mem_gb` for `MLXMonitor`.
 
 ## 4. Exporting & Fusing
 
 Just like text models, once the LoRA training finishes, the adapter weights must be fused back into the base model.
-Because we are using `mlx-vlm`, the `mlxtune fuse` command will fuse adapters into *both* the language model and the audio encoder simultaneously, producing a single, monolithic `.safetensors` directory ready for our `ask_audio.py` script or the upcoming native Swift implementation.
+`mlxtune fuse --multimodal` fuses the adapter into *both* the language model and (if tuned) the audio encoder. It loads the base with mlx-tune's `FastVisionModel`, fuses each LoRA layer dequantized, and saves a single `.safetensors` under the base checkpoint's key layout, so the result loads like the original checkpoint (`mlx_vlm.load`, `ask_audio.py`). A fused checkpoint reproduces the adapter model's transcriptions exactly.
 
 ### Export Format Compatibility Matrix
 *   **GGUF `q4_0`:** Verified for E2B, E4B and 12B (Sept 2026, via mlx-tune `export_to_gguf(qat=True)`): tensor layout and types match Google's official QAT GGUFs, and all three load and generate in llama.cpp. Text model only; audio/vision need a separate `mmproj` file. Check vocab = 262144 (see FL-005).

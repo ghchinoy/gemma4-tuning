@@ -21,7 +21,9 @@ Training a 2-billion or 9-billion parameter model requires massive memory. **LoR
 Different ecosystems handle "quantization" (compressing model weights from 16-bit to 4-bit or 8-bit) differently.
 *   **MLX:** Uses highly specific 4-bit matrix scales tailored for Apple's Metal framework.
 *   **llama.cpp:** Uses a format called GGUF. The conversion scripts for GGUF expect clean, standard 16-bit PyTorch tensors.
-*   **The Pipeline Fix:** To bridge these ecosystems, the `mlxtune fuse` command actively **dequantizes** the MLX model back to 16-bit (`--dequantize`). Then, the `mlxtune gguf` command passes it to `llama.cpp` to be **re-quantized** into a standard `q8_0` or `q4_k_m` GGUF file.
+*   **The Pipeline Fix:** To bridge these ecosystems, the pipeline first **dequantizes**: `mlxtune fuse` (built on mlx-tune's merge) folds the LoRA adapter into the base and writes full-precision 16-bit weights. Then `mlxtune gguf` hands them to llama.cpp, which converts them (`convert_hf_to_gguf.py`) and **re-quantizes** them (`llama-quantize`) into a standard `q8_0`, `q4_k_m` or `q4_0` GGUF file. `mlxtune gguf --model <base> --adapter ./adapters` does both steps at once.
+*   **Two environments:** llama.cpp's converter pins its own Python dependencies (e.g. an older `transformers`), so it runs from a separate `llama.cpp/.venv`. Mixing it into the main environment breaks Gemma 4 conversion (FRICTION_LOG FL-007).
+*   **Why verify:** a conversion can "succeed" and still produce a broken file. A stray tokenizer from another model once produced an unloadable GGUF (FL-005). For Gemma 4, check the vocabulary is 262,144 and compare the tensors with Google's official QAT GGUF.
 
 ### 🧠 Gemma 4 QAT (Quantization-Aware Training) Alignment
 

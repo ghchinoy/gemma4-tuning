@@ -35,5 +35,4 @@ temp_lora_config.yaml
 # tool / OS config
 .DS_Store
 .serena/
-AGENTS.md
 .geminiignore

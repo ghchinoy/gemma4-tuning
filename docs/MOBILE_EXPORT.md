@@ -61,14 +61,15 @@ To generate these outputs, the training team starts with the exact same base mod
 
 ### Path A: GGUF Target
 ```
-HF Base + Checkpoint ──> mlxtune fuse ──> Dequantized Safetensors ──> llama.cpp convert ──> GGUF (e.g. Q4_K_M)
+HF Base + Checkpoint ──> mlxtune fuse ──> Dequantized Safetensors ──> llama.cpp convert + quantize ──> GGUF (e.g. Q4_K_M, Q4_0 for QAT)
 ```
+*(`mlxtune gguf --model <base> --adapter <adapters>` runs all of this in one step through mlx-tune. The GGUF holds the text model only; audio/vision need a separate llama.cpp `mmproj` file.)*
 
 ### Path B: LiteRT-LM Target
 ```
 HF Base + Checkpoint ──> mlxtune fuse ──> Fused Dequantized Weights ──> litert-torch export_hf ──> Model Package (.litertlm)
 ```
-*(By passing `--prefused` pointing to the output of `mlxtune fuse`, we bypass heavy on-the-fly PEFT loading, reducing compilation RAM usage by over 5GB).*
+*(By passing `--prefused` pointing to the output of `mlxtune fuse`, we bypass heavy on-the-fly PEFT loading, reducing compilation RAM usage by over 5GB. LiteRT-LM export works for E2B/E4B; 12B needs >90GB RAM, see FRICTION_LOG FL-004.)*
 
 ### Path C: MLX Swift Target
 ```

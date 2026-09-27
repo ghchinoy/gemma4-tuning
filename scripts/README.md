@@ -72,32 +72,29 @@ This utility provides the tuning team with an automated compiler suite to export
 
 ### How to Use the Script
 
-The script supports PEP 723 inline dependency declarations and executes cleanly using `uv`.
-
-> [!IMPORTANT]
-> **Python 3.14 Compatibility Alert:**
-> The underlying `torchao` dependency used by the LiteRT converter is incompatible with the experimental Python 3.14 typing system, resulting in typing module attribute errors during conversion. To run compilation successfully, you **MUST** pin the execution runtime to stable **Python 3.11** or **Python 3.12** using `uv`'s `--python` flag.
+The script runs in the gemmma project environment (Python 3.12, `uv run` from the repo root). GGUF and MLX use
+the same mlx-tune code paths as `mlxtune gguf` / `mlxtune fuse`. GGUF needs the `llama.cpp/.venv` converter
+environment (main README, step 7).
 
 ```bash
 # Display help and usage options
 uv run scripts/export_formats.py --help
 
-# 1. Compile for GGUF (Desktop & llama-server)
+# 1. Compile for GGUF (Desktop & llama-server); add --qat for Gemma QAT checkpoints (strict q4_0)
 uv run scripts/export_formats.py gguf \
   --base ./model \
   --adapter ./adapters \
   --dest my_custom_model.gguf \
   --outtype q4_k_m
 
-# 2. Compile for LiteRT-LM (iOS & Android Offline Flatbuffers)
-# Note: Always pin Python to 3.11/3.12. Use the `--prefused` parameter 
-# pointing to your dequantized fused model to bypass heavy on-the-fly PEFT 
-# weight merging, saving over 5GB of active system RAM!
-uv run --python 3.11 --with litert-torch --with torch --with transformers scripts/export_formats.py litert \
-  --base /Users/ghchinoy/projects/gemmma/model \
-  --adapter /Users/ghchinoy/projects/eldamo-group/eldamo-tune/models/adapters \
-  --dest /Users/ghchinoy/projects/eldamo-group/eldamo-tune/models/litert \
-  --prefused /Users/ghchinoy/projects/gemmma/fused_model_dequantized
+# 2. Compile for LiteRT-LM (iOS & Android offline flatbuffers). litert-torch is not a project
+# dependency, so add it for this run. Point --prefused at the output of `mlxtune fuse` to skip
+# on-the-fly PEFT merging (saves over 5GB of RAM). E2B/E4B only: 12B needs >90GB RAM (FL-004).
+uv run --with litert-torch scripts/export_formats.py litert \
+  --base ./model \
+  --adapter ./adapters \
+  --dest ./models/litert \
+  --prefused ./fused_model_dequantized
 
 # 3. Compile for Standard MLX (Apple Silicon Swift pipelines)
 uv run scripts/export_formats.py mlx \

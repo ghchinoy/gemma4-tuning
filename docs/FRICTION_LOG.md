@@ -10,7 +10,7 @@ These entries are structured to be directly actionable for upstream maintainers 
 
 | Issue ID | Component | Severity | Title | Status / Workaround |
 | :--- | :--- | :--- | :--- | :--- |
-| **FL-001** | `llama.cpp` / `llama-cli` | 🔴 **BLOCKER** | Gemma 4 KV Attention Infinite CPU Loop | Avoid `llama-cli` for Gemma 4; use `mlx_vlm` |
+| **FL-001** | `llama.cpp` / `llama-cli` | 🔶 **MAJOR** | `llama-cli` Never Exits When Scripted (100% CPU) | Use `llama-completion` for scripted GGUF inference (Gemma 4 GGUFs load fine) |
 | **FL-002** | `mlx` / `mlx_vlm` | 🔶 **MAJOR** | Silent Failure & `<pad>` Output via Key-Mangling | Save parameters with native leaf keys + format metadata |
 | **FL-003** | Apple Metal Driver / `mlx` | 🔶 **MAJOR** | Fatal Process Termination on Metal OOM | Use `MLX_GPU_DISABLE=1` shell prefix for CPU fallback |
 | **FL-004** | `litert-torch` (v0.9.1) | 🔶 **MAJOR** | 12B LiteRT-LM Export OOM (Hardcoded FP32 Load, No Offloading) | Ship 12B via GGUF q4_0 + MLX 4-bit; LiteRT-LM for E2B/E4B only |
@@ -54,6 +54,17 @@ Avoid running GGUF inference via `llama-cli` locally for Gemma 4 architectures u
 from mlx_vlm import load, generate
 model, processor = load("google-gemma-4-E2B-it-qat-q4_0-unquantized")
 ```
+
+### 🔄 Re-diagnosis (Sept 2026, llama.cpp build 10330)
+The "Gemma 4 parser loop" explanation above does not hold on current llama.cpp:
+- **Gemma 4 GGUFs load and run fine.** Google's official E2B/E4B/12B QAT GGUFs and our own exports generate correctly with `llama-completion` and with `llama-cli -st`.
+- **The hang is `llama-cli`'s interactive mode.** `llama-cli` is now chat-only: even with `-no-cnv` it enters its `>` prompt loop. With stdin closed (as in scripts and `subprocess`) it redraws the prompt endlessly, pinning ~100% CPU and never exiting. One 60s run wrote 42 million `> ` prompts. It isn't Gemma-specific.
+
+**Workaround (current):** for scripted/non-interactive GGUF inference use **`llama-completion`**:
+```bash
+llama-completion -m model.gguf -bf prompt.txt -n 128 --temp 0 -no-cnv --no-display-prompt -ngl 99
+```
+Use `-bf` (binary file) rather than `-f`, which drops a trailing newline (e.g. after Gemma 4's `<|turn>model\n`) and so changes the prompt tokens. `llama-cli -st` (single turn) also exits, but it's meant for interactive use. `mlxtune benchmark` uses `llama-completion`.
 
 ---
 

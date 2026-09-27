@@ -30,11 +30,11 @@ uv run mlxtune prep \
   --samples 50 \
   --dest ./data_audio
 ```
-*Verify: Check `./data_audio/train.jsonl` to ensure the `content` array contains `{"type": "audio", "audio": "<absolute_path>"}`.*
+*Verify: Check `./data_audio/train.jsonl` to ensure the `content` array contains `{"type": "audio", "audio": "<absolute_path>"}`. Bare filenames fail in the collator, and the audio files must exist on disk (not only inside the Hugging Face cache's arrow files).*
 
 ### Step 2: Train the Multimodal LoRA Adapter
 Run the fine-tuning process. The `--multimodal` flag instructs the pipeline to use `mlx-vlm` to process the audio tensors.
-*   **Batch Size:** Keep this at `1` or `2`! Processing raw audio waveforms consumes significantly more VRAM than text.
+*   **Batch Size:** Use `1` (the collator processes one audio sample at a time). Add `--tune-audio-encoder` to also train the audio tower (≈ +35% memory).
 *   **Telemetry:** Open the `MLXMonitor` Swift app in another window to watch the `Peak mem (GB)` and `Train loss` metrics live.
 
 ```bash
@@ -60,7 +60,7 @@ uv run mlxtune eval \
 *(Note: As `mlx-vlm` generation scripts evolve, you may need to pass `--audio /path/to/file.wav` if the basic `eval` command does not automatically extract it from the prompt).*
 
 ### Step 4: Fuse the Adapters
-Bake the LoRA weights permanently into the base model.
+Bake the LoRA weights permanently into the base model. The fused checkpoint keeps the base's key layout, so it loads with `mlx_vlm.load` like the original, and it should reproduce the adapter's transcriptions exactly.
 ```bash
 uv run mlxtune fuse \
   --model ~/projects/gemma/mlx-gemma-4-e2b \

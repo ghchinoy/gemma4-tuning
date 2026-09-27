@@ -4,13 +4,19 @@ This repository contains an end-to-end pipeline (`mlxtune`) for downloading, pre
 
 ## Prerequisites
 
-You need the `uv` Python package manager, the `hf` (Hugging Face) CLI, and `llama.cpp` installed on your system.
+You need the `uv` Python package manager, the `hf` (Hugging Face) CLI, and `llama.cpp` (Homebrew for the
+`llama-quantize` / `llama-completion` binaries, plus a checkout for the GGUF converter script).
 
 ```bash
 brew install huggingface-cli
 brew install llama.cpp
 # Ensure uv is installed: curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync                                   # Python 3.12 environment (.venv)
+git clone https://github.com/ggml-org/llama.cpp   # converter script (gitignored)
 ```
+The pipeline is built on [mlx-tune](https://github.com/ARahim3/mlx-tune), currently pinned to a fork until its
+llama.cpp GGUF export ([#23](https://github.com/ARahim3/mlx-tune/pull/23)) is released. The one-time converter
+environment for GGUF export is described in step 7. Known upstream issues and workarounds: [`docs/FRICTION_LOG.md`](docs/FRICTION_LOG.md).
 
 ## The 8-Step `mlxtune` Pipeline
 
@@ -48,7 +54,8 @@ uv run mlxtune eval --prompt "Write a short poem about MLX."
 ### 6. Fuse the Model
 Bakes the trained LoRA adapter weights permanently into the base model. This step *dequantizes* the MLX model back to 16-bit so that it can be cleanly converted to GGUF later.
 ```bash
-uv run mlxtune fuse
+uv run mlxtune fuse                 # text models
+uv run mlxtune fuse --multimodal    # Gemma 4 audio/vision adapters
 ```
 
 ### 7. Export to GGUF
@@ -83,10 +90,10 @@ Programmatically evaluates the semantic "drift" introduced by compressing your m
 ```bash
 uv run mlxtune benchmark --reference-model "./fused_model_dequantized" --gguf-model "my-custom-model.gguf"
 ```
-*Note: This command will automatically run Jaccard vocabulary similarity matching and output a complete tutorial on executing mathematical validation via `llama-perplexity`.*
+*Note: This runs both models on the same chat-templated prompt with greedy decoding (the GGUF via `llama-completion`), scores word-level Jaccard similarity, and prints a guide to formal validation with `llama-perplexity`.*
 
 ### 10. Multi-Format Mobile Export
-Compiles and quantizes your fine-tuned model into mobile-optimized runtimes (LiteRT-LM and native MLX formats) for completely offline sandboxed app execution.
+Compiles your fine-tuned model into GGUF, LiteRT-LM or native MLX formats for offline app execution (see [`skills/gemma-model-export/SKILL.md`](skills/gemma-model-export/SKILL.md)).
 ```bash
 uv run scripts/export_formats.py --help
 ```
@@ -115,6 +122,8 @@ llama-server -m my-custom-model.gguf -c 4096 --port 8080
 ```
 
 ## 🤖 Agent Purposes, Capabilities & Specialized Guides
+
+AI assistants: start with [`GEMINI.md`](GEMINI.md) (project rules and the **Tactical Operations** checklist); [`AGENTS.md`](AGENTS.md) points to it.
 
 To maximize **didactic ease of use** and support automated AI coding assistants, the repository houses both comprehensive markdown documentation and structured AI "Agent Skills" (conforming to the [agentskills.io specification](https://agentskills.io/specification.md)). 
 
