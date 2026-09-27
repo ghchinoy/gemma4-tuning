@@ -4,6 +4,86 @@ This journal serves as an experiment tracker and MLOps log for training, fusing,
 
 ---
 
+## 🔬 Experiment ID: AUDIO-E2B-CONFIGA-LM-ONLY
+*   **Date:** 2026-09-07
+*   **Base Model:** `google-gemma-4-E2B-it-qat-q4_0-unquantized`
+*   **Hardware:** Apple Silicon Mac (Metal GPU)
+*   **Status:** 🟢 COMPLETED
+
+---
+
+### 🎛️ Hyperparameters
+
+| Parameter | Value | Rationale / Detail |
+| :--- | :--- | :--- |
+| **Iterations (`--iters`)** | `50` | Training steps. |
+| **Batch Size** | `1` | Batch training count. |
+| **LoRA Rank (`--rank`)** | `8` | LoRA adapter width. |
+| **Target Layers** | `8` | Frozen boundary layer targeting. |
+| **Dataset** | `minds14-banking-en-US` | Data source. |
+
+---
+
+### 📊 Evaluation & Results
+
+#### 1. Training Telemetry
+*   **Validation Loss at start:** `2.9062`
+*   **Validation Loss at end:** `0.8086`
+*   **Peak GPU Memory:** `15.48 GB`
+
+#### 2. Quantization Drift Analysis
+*   **Reference FP16 Response:** *[Awaiting execution]*
+*   **Quantized GGUF Response:** *[Awaiting execution]*
+*   **Jaccard Similarity Score:** `*[Awaiting execution]*`
+*   **Calculated Quantization Drift:** `*[Awaiting execution]*`
+
+---
+
+### 💡 Notes & Lessons Learned
+Config A: LM-only LoRA (audio encoder frozen), 12.08M trainable params (0.261%), 45 minds14 banking-domain audio transcription examples. Wall time ~91s for 50 iters. Baseline for audio-tower ablation vs Config B.
+
+---
+
+## 🔬 Experiment ID: AUDIO-E2B-CONFIGB-LM-PLUS-AUDIO-TOWER
+*   **Date:** 2026-09-07
+*   **Base Model:** `google-gemma-4-E2B-it-qat-q4_0-unquantized`
+*   **Hardware:** Apple Silicon Mac (Metal GPU)
+*   **Status:** 🟢 COMPLETED
+
+---
+
+### 🎛️ Hyperparameters
+
+| Parameter | Value | Rationale / Detail |
+| :--- | :--- | :--- |
+| **Iterations (`--iters`)** | `50` | Training steps. |
+| **Batch Size** | `1` | Batch training count. |
+| **LoRA Rank (`--rank`)** | `8` | LoRA adapter width. |
+| **Target Layers** | `8` | Frozen boundary layer targeting. |
+| **Dataset** | `minds14-banking-en-US` | Data source. |
+
+---
+
+### 📊 Evaluation & Results
+
+#### 1. Training Telemetry
+*   **Validation Loss at start:** `2.9062`
+*   **Validation Loss at end:** `0.7461`
+*   **Peak GPU Memory:** `20.962 GB`
+
+#### 2. Quantization Drift Analysis
+*   **Reference FP16 Response:** *[Awaiting execution]*
+*   **Quantized GGUF Response:** *[Awaiting execution]*
+*   **Jaccard Similarity Score:** `*[Awaiting execution]*`
+*   **Calculated Quantization Drift:** `*[Awaiting execution]*`
+
+---
+
+### 💡 Notes & Lessons Learned
+Config B: LM LoRA + audio tower LoRA (48 Conformer layers adapted), same 12.08M trainable params reported by mlx-tune PEFT summary. Wall time ~332s for 50 iters (3.6x slower than Config A due to audio encoder backward pass). Peak memory +35% vs Config A (20.96GB vs 15.48GB). Final loss modestly lower (0.746 vs 0.809) but not dramatically better on this small 45-example single-speaker-domain (banking) dataset -- audio tower tuning benefit likely more pronounced on accent/noise-shift or new-language transcription tasks per docs/MULTIMODAL_PIPELINE.md guidance, not simple single-domain ASR fine-tuning.
+
+---
+
 ## 🔬 Experiment ID: QAT-4B-ELDAMO-001
 *   **Date:** 2026-06-14
 *   **Base Model:** `google-gemma-4-E4B-it-qat-q4_0-unquantized`

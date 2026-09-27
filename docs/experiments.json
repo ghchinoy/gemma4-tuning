@@ -108,5 +108,49 @@
       "gguf_response": "Not executable in llama.cpp (llama-server/llama-cli) due to the upstream Attention KV layer tensor loader bug: missing tensor \"blk.24.attn_k.weight\" in Gemma 4 E4B. Verified successful execution bypass using native MLX on the fused FP16 weights."
     },
     "notes": "Successful 100-iteration fine-tuning run of Gemma 4 E4B (4B Mobile QAT variant) on Apple GPU (Metal) using combined conversational QA and CoT phonetic derivation datasets. Stable convergence without out-of-memory errors."
+  },
+  "AUDIO-E2B-CONFIGA-LM-ONLY": {
+    "date": "2026-09-07",
+    "model": "google-gemma-4-E2B-it-qat-q4_0-unquantized",
+    "status": "COMPLETED",
+    "hyperparameters": {
+      "iters": 50,
+      "batch_size": 1,
+      "rank": 8,
+      "layers": 8,
+      "dataset": "minds14-banking-en-US"
+    },
+    "results": {
+      "val_loss_start": 2.9062,
+      "val_loss_end": 0.8086,
+      "peak_mem_gb": 15.48,
+      "jaccard_score": null,
+      "drift_score": null,
+      "ref_response": null,
+      "gguf_response": null
+    },
+    "notes": "Config A: LM-only LoRA (audio encoder frozen), 12.08M trainable params (0.261%), 45 minds14 banking-domain audio transcription examples. Wall time ~91s for 50 iters. Baseline for audio-tower ablation vs Config B."
+  },
+  "AUDIO-E2B-CONFIGB-LM-PLUS-AUDIO-TOWER": {
+    "date": "2026-09-07",
+    "model": "google-gemma-4-E2B-it-qat-q4_0-unquantized",
+    "status": "COMPLETED",
+    "hyperparameters": {
+      "iters": 50,
+      "batch_size": 1,
+      "rank": 8,
+      "layers": 8,
+      "dataset": "minds14-banking-en-US"
+    },
+    "results": {
+      "val_loss_start": 2.9062,
+      "val_loss_end": 0.7461,
+      "peak_mem_gb": 20.962,
+      "jaccard_score": null,
+      "drift_score": null,
+      "ref_response": null,
+      "gguf_response": null
+    },
+    "notes": "Config B: LM LoRA + audio tower LoRA (48 Conformer layers adapted), same 12.08M trainable params reported by mlx-tune PEFT summary. Wall time ~332s for 50 iters (3.6x slower than Config A due to audio encoder backward pass). Peak memory +35% vs Config A (20.96GB vs 15.48GB). Final loss modestly lower (0.746 vs 0.809) but not dramatically better on this small 45-example single-speaker-domain (banking) dataset -- audio tower tuning benefit likely more pronounced on accent/noise-shift or new-language transcription tasks per docs/MULTIMODAL_PIPELINE.md guidance, not simple single-domain ASR fine-tuning."
   }
 }
