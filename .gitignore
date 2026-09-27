@@ -17,3 +17,23 @@ __pycache__
 
 # MLXMonitor Swift artifacts
 /MLXMonitor/.build/
+
+# additional pipeline artifacts (model weights, adapters, datasets)
+/adapters*/
+/fused_*/
+/data_audio/
+/scratch/
+scratch_test_native.py
+temp_lora_config.yaml
+
+# local-only: upstream contribution workspace (tracked via fork + issues)
+/upstream_contributions/
+
+# Swift build artifacts
+/MLXAudioUI/.build/
+
+# tool / OS config
+.DS_Store
+.serena/
+AGENTS.md
+.geminiignore
