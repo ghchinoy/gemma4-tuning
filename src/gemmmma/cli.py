@@ -105,41 +105,294 @@ def prep_dataset(dataset_id, dataset_config, dest_dir, max_samples=None):
             
     print(f"==> Dataset prepped and saved to {dest_dir}/")
 
+class MLXMonitorCallback:
+    """Callback hook for streaming training & validation telemetry to training_log.jsonl."""
+    def __init__(self, log_path):
+        self.log_path = log_path
+
+    def on_train_loss_report(self, train_info: dict):
+        entry = {
+            "type": "train",
+            "iter": int(train_info.get("iteration", 0)),
+            "loss": round(float(train_info.get("train_loss", 0.0)), 4),
+            "learning_rate": float(train_info.get("learning_rate", 0.0)),
+            "it_sec": round(float(train_info.get("iterations_per_second", 0.0)), 2),
+            "tokens_sec": round(float(train_info.get("tokens_per_second", 0.0)), 1),
+            "trained_tokens": int(train_info.get("trained_tokens", 0)),
+            "peak_mem_gb": round(float(train_info.get("peak_memory", 0.0)), 3)
+        }
+        with open(self.log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def on_val_loss_report(self, val_info: dict):
+        entry = {
+            "type": "val",
+            "iter": int(val_info.get("iteration", 0)),
+            "loss": round(float(val_info.get("val_loss", 0.0)), 4),
+            "val_took_s": round(float(val_info.get("val_time", 0.0)), 2)
+        }
+        with open(self.log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+def _is_vlm_model(model_path, explicit_multimodal=False):
+    """Detects whether training should use the Multimodal (VLM / Audio) pipeline."""
+    return bool(explicit_multimodal)
+
+
 def run_train(model_path, data_path, iters, batch_size, log_file="training_log.jsonl", multimodal=False, tune_audio_encoder=False, qat=False, rank=8, lora_layers=16, learning_rate=1e-5):
     """
-    Executes the LoRA training loop on the Apple GPU (Metal).
-    This freezes the base model and only updates a tiny set of adapter weights.
-    Logs metrics to a JSONL file for external monitoring.
+    Executes the LoRA training loop on Apple GPU (Metal) using mlx-tune.
+    Freezes base model weights and trains low-rank adapters with native telemetry.
     """
     import re
     import datetime
+    import time
+    from pathlib import Path
     
-    print(f"==> Starting LoRA training with MLX...")
+    print(f"==> Starting LoRA training with mlx-tune engine on Apple Silicon...")
     if qat:
-        print("==> [QAT Optimization] Utilizing conservative rank and layers to minimize adapter post-training quantization drift.")
-    
-    if multimodal:
-        # Modern mlx_vlm CLI syntax
-        cmd = [
-            "python", "-m", "mlx_vlm.lora",
-            "--model-path", model_path,
-            "--dataset", data_path,
-            "--iters", str(iters),
-            "--batch-size", str(batch_size),
-            "--output-path", "adapters",
-            "--lora-rank", str(rank),
-            "--learning-rate", str(learning_rate)
-        ]
-        
-        if tune_audio_encoder:
-            print("==> Targeting Audio Encoder layers for Multimodal LoRA tuning.")
-            # Adjust if mlx_vlm uses specific regex or flags for fine-tuning specific components
-            # e.g., cmd.extend(["--fine-tune-type", "audio_encoder"]) 
-    else:
-        # mlx_lm.lora requires a configuration file to specify custom LoRA parameters like rank.
-        # We generate a temporary config on-the-fly to ensure standard-aligned execution.
-        print("==> Generating temporary LoRA YAML configuration with Memory Optimizations...")
-        config_content = f"""# Temporary LoRA Config for MLX
+        print("==> [QAT Optimization] Enforcing conservative rank and unquantized base checkpoint flow.")
+
+    is_vlm = _is_vlm_model(model_path, explicit_multimodal=multimodal)
+    print(f"==> Architecture pipeline: {'Multimodal (VLM / Audio / Vision)' if is_vlm else 'Standard Causal LM'}")
+
+    start_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with open(log_file, "w") as f:
+        f.write(json.dumps({"type": "status", "status": "started", "timestamp": start_time}) + "\n")
+        f.write(json.dumps({
+            "type": "config",
+            "model": model_path,
+            "data": data_path,
+            "total_iters": iters,
+            "batch_size": batch_size,
+            "multimodal": is_vlm,
+            "model_style": "QAT" if qat else "Standard",
+            "rank": rank,
+            "lora_layers": lora_layers
+        }) + "\n")
+
+    trained_native = False
+
+    # Try programmatic MLX-Tune training
+    try:
+        if is_vlm:
+            from mlx_tune import FastVisionModel, UnslothVisionDataCollator
+            from mlx_tune.vlm import _VLMTrainerShim, _detect_assistant_role_token
+            from mlx_vlm.trainer.sft_trainer import save_adapter
+            import mlx.core as mx
+            import mlx.nn as nn
+            import mlx.optimizers as optim
+            from tqdm import tqdm
+
+            print(f"==> [mlx-tune] Loading Multimodal VLM: {model_path}...")
+            model_wrapper, processor = FastVisionModel.from_pretrained(
+                model_name=model_path,
+                load_in_4bit=not qat,
+            )
+
+            print(f"==> [mlx-tune] Applying PEFT (audio_layers={tune_audio_encoder}, rank={rank})...")
+            model_wrapper = FastVisionModel.get_peft_model(
+                model_wrapper,
+                finetune_vision_layers=False,
+                finetune_language_layers=True,
+                finetune_audio_layers=tune_audio_encoder,
+                finetune_attention_modules=True,
+                finetune_mlp_modules=True,
+                r=rank,
+                lora_alpha=rank * 2,
+                lora_dropout=0.0,
+                bias="none",
+            )
+            FastVisionModel.for_training(model_wrapper)
+
+            # Load dataset from JSONL
+            train_jsonl = os.path.join(data_path, "train.jsonl")
+            train_dataset = []
+            with open(train_jsonl, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        train_dataset.append(json.loads(line))
+
+            print(f"==> Loaded {len(train_dataset)} training examples from {train_jsonl}")
+
+            collator = UnslothVisionDataCollator(model_wrapper, processor)
+            optimizer = optim.Adam(learning_rate=learning_rate)
+            assistant_id = _detect_assistant_role_token(processor) or 77091
+            trainer = _VLMTrainerShim(model_wrapper.model, optimizer, train_on_completions=True, assistant_id=assistant_id)
+            loss_and_grad_fn = nn.value_and_grad(trainer.model, trainer.loss_fn)
+
+            progress = tqdm(range(iters), desc="Training Gemma 4 VLM")
+            total_loss = 0.0
+            step = 0
+            step_start = time.time()
+
+            while step < iters:
+                for i in range(0, len(train_dataset), batch_size):
+                    if step >= iters:
+                        break
+                    batch_samples = train_dataset[i : i + batch_size]
+                    batch = collator(batch_samples)
+
+                    loss, grads = loss_and_grad_fn(trainer.model, batch)
+                    trainer.optimizer.update(trainer.model, grads)
+                    mx.eval(trainer.model, trainer.optimizer.state)
+
+                    loss_val = float(loss.item())
+                    total_loss += loss_val
+                    step += 1
+
+                    step_dur = time.time() - step_start
+                    step_start = time.time()
+                    it_sec = 1.0 / max(step_dur, 1e-4)
+                    peak_mem = float(mx.metal.get_peak_memory() / (1024**3)) if mx.metal.is_available() else 0.0
+
+                    progress.update(1)
+                    progress.set_postfix({"loss": f"{loss_val:.4f}", "avg_loss": f"{(total_loss/step):.4f}"})
+
+                    entry = {
+                        "type": "train",
+                        "iter": step,
+                        "loss": round(loss_val, 4),
+                        "learning_rate": learning_rate,
+                        "it_sec": round(it_sec, 2),
+                        "peak_mem_gb": round(peak_mem, 3)
+                    }
+                    with open(log_file, "a") as lf:
+                        lf.write(json.dumps(entry) + "\n")
+
+            progress.close()
+
+            # Save adapter artifacts
+            adapter_dir = Path("adapters")
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            save_adapter(trainer.model, str(adapter_dir / "adapters.safetensors"))
+
+            # Save dual-compatible adapter_config.json
+            adapter_cfg = {
+                "rank": rank,
+                "alpha": float(rank * 2),
+                "dropout": 0.0,
+                "fine_tune_type": "lora",
+                "lora_parameters": {
+                    "rank": rank,
+                    "scale": 2.0,
+                    "dropout": 0.0,
+                    "keys": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+                }
+            }
+            with open(adapter_dir / "adapter_config.json", "w") as acf:
+                json.dump(adapter_cfg, acf, indent=2)
+
+            trained_native = True
+            print(f"==> Training complete! Adapters saved to {adapter_dir}/")
+
+        else:
+            from mlx_tune import FastLanguageModel
+            from mlx_lm.tuner.trainer import train as mlx_train, TrainingArgs
+            from mlx_lm.tuner.datasets import load_dataset as mlx_load_dataset, CacheDataset
+            import mlx.optimizers as optim
+            import types
+
+            print(f"==> [mlx-tune] Loading Causal LM: {model_path}...")
+            model_wrapper, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_path,
+                max_seq_length=2048,
+                load_in_4bit=not qat,
+            )
+            model_wrapper = FastLanguageModel.get_peft_model(
+                model_wrapper,
+                r=rank,
+                lora_alpha=rank * 2,
+                num_layers=lora_layers,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            )
+
+            # Apply LoRA in memory
+            if hasattr(model_wrapper, '_apply_lora') and not model_wrapper._lora_applied:
+                model_wrapper._apply_lora(num_layers=lora_layers)
+
+            actual_model = model_wrapper.model if hasattr(model_wrapper, 'model') else model_wrapper
+
+            # Setup dataset
+            dataset_args = types.SimpleNamespace(
+                data=data_path,
+                train=True,
+                test=False,
+                hf_dataset=None,
+                mask_prompt=False,
+            )
+            train_set, valid_set, _ = mlx_load_dataset(args=dataset_args, tokenizer=tokenizer)
+            train_set = CacheDataset(train_set)
+            valid_set = CacheDataset(valid_set) if valid_set else None
+
+            # Setup optimizer and arguments
+            optimizer = optim.AdamW(learning_rate=learning_rate)
+            adapter_dir = Path("adapters")
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            adapter_file = str(adapter_dir / "adapters.safetensors")
+
+            training_args = TrainingArgs(
+                batch_size=batch_size,
+                iters=iters,
+                val_batches=5 if valid_set else 0,
+                steps_per_report=max(1, iters // 20),
+                steps_per_eval=max(iters // 5, 50),
+                steps_per_save=iters,
+                max_seq_length=2048,
+                adapter_file=adapter_file,
+                grad_checkpoint=True,
+            )
+
+            print("==> Launching native training loop with MLXMonitor streaming...")
+            mlx_train(
+                model=actual_model,
+                optimizer=optimizer,
+                train_dataset=train_set,
+                val_dataset=valid_set,
+                args=training_args,
+                training_callback=MLXMonitorCallback(log_file),
+            )
+
+            # Save adapter config
+            adapter_cfg = {
+                "rank": rank,
+                "alpha": float(rank * 2),
+                "dropout": 0.0,
+                "fine_tune_type": "lora",
+                "num_layers": lora_layers,
+                "lora_parameters": {
+                    "rank": rank,
+                    "scale": 2.0,
+                    "dropout": 0.0,
+                    "keys": ["self_attn.q_proj", "self_attn.v_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
+                }
+            }
+            with open(adapter_dir / "adapter_config.json", "w") as acf:
+                json.dump(adapter_cfg, acf, indent=2)
+
+            trained_native = True
+            print(f"==> Training complete! Adapters saved to {adapter_dir}/")
+
+    except Exception as e:
+        print(f"\n⚠️  Programmatic training encountered an exception: {e}")
+        print("==> Engaging robust CLI subprocess fallback pipeline...")
+
+    if not trained_native:
+        # Fallback to subprocess training
+        if is_vlm:
+            cmd = [
+                "python", "-m", "mlx_vlm.lora",
+                "--model-path", model_path,
+                "--dataset", data_path,
+                "--iters", str(iters),
+                "--batch-size", str(batch_size),
+                "--output-path", "adapters",
+                "--lora-rank", str(rank),
+                "--learning-rate", str(learning_rate)
+            ]
+        else:
+            config_content = f"""# Temporary LoRA Config for MLX
 model: "{model_path}"
 train: true
 data: "{data_path}"
@@ -155,133 +408,93 @@ lora_parameters:
   dropout: 0.0
   keys: ["self_attn.q_proj", "self_attn.v_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
 """
-        with open("temp_lora_config.yaml", "w") as cf:
-            cf.write(config_content)
+            with open("temp_lora_config.yaml", "w") as cf:
+                cf.write(config_content)
+            cmd = ["python", "-m", "mlx_lm.lora", "--config", "temp_lora_config.yaml"]
 
-        cmd = [
-            "python", "-m", "mlx_lm.lora",
-            "--config", "temp_lora_config.yaml"
-        ] 
-    
-    print(f"==> Logging metrics to {log_file}")
-    
-    start_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with open(log_file, "w") as f:
-        f.write(json.dumps({"type": "status", "status": "started", "timestamp": start_time}) + "\n")
-        f.write(json.dumps({
-            "type": "config",
-            "model": model_path,
-            "data": data_path,
-            "total_iters": iters,
-            "batch_size": batch_size,
-            "multimodal": multimodal,
-            "model_style": "QAT" if qat else "Standard",
-            "rank": rank,
-            "lora_layers": lora_layers
-        }) + "\n")
-        
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    
-    train_pattern = re.compile(r"Iter\s+(\d+):\s+Train loss\s+([\d.]+),\s+Learning Rate\s+([\d.e+-]+),\s+It/sec\s+([\d.]+),\s+Tokens/sec\s+([\d.]+),\s+Trained Tokens\s+(\d+),\s+Peak mem\s+([\d.]+)\s+GB")
-    val_pattern = re.compile(r"Iter\s+(\d+):\s+Val loss\s+([\d.]+),\s+Val took\s+([\d.]+)s")
-    
-    for line in process.stdout:
-        print(line, end="") # Keep printing to the terminal
-        
-        # Clean ANSI escape codes to ensure clean regex matching
-        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
-        
-        log_entry = None
-        train_match = train_pattern.search(clean_line)
-        if train_match:
-            log_entry = {
-                "type": "train", 
-                "iter": int(train_match.group(1)), 
-                "loss": float(train_match.group(2)),
-                "learning_rate": float(train_match.group(3)),
-                "it_sec": float(train_match.group(4)),
-                "tokens_sec": float(train_match.group(5)),
-                "trained_tokens": int(train_match.group(6)),
-                "peak_mem_gb": float(train_match.group(7))
-            }
-            
-        val_match = val_pattern.search(clean_line)
-        if val_match:
-            log_entry = {
-                "type": "val", 
-                "iter": int(val_match.group(1)), 
-                "loss": float(val_match.group(2)),
-                "val_took_s": float(val_match.group(3))
-            }
-            
-        if log_entry:
-            with open(log_file, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
-                
-    process.wait()
-    
-    if multimodal:
-        # Patch the adapter_config.json because mlx_vlm.generate expects "rank" at the root level,
-        # but mlx_lm leaves a stale one with "lora_parameters", or mlx_vlm doesn't write it fully.
-        
-        # In newer versions, mlx_vlm often dumps adapter files at the root instead of the output path.
-        if os.path.exists("adapter_config.json") and not os.path.exists("adapters/adapter_config.json"):
-            os.makedirs("adapters", exist_ok=True)
-            shutil.move("adapter_config.json", "adapters/adapter_config.json")
-            if os.path.exists("adapters.safetensors"):
-                shutil.move("adapters.safetensors", "adapters/adapters.safetensors")
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        train_pattern = re.compile(r"Iter\s+(\d+):\s+Train loss\s+([\d.]+),\s+Learning Rate\s+([\d.e+-]+),\s+It/sec\s+([\d.]+),\s+Tokens/sec\s+([\d.]+),\s+Trained Tokens\s+(\d+),\s+Peak mem\s+([\d.]+)\s+GB")
+        val_pattern = re.compile(r"Iter\s+(\d+):\s+Val loss\s+([\d.]+),\s+Val took\s+([\d.]+)s")
 
-        adapter_config_path = "adapters/adapter_config.json"
-        if os.path.exists(adapter_config_path):
-            try:
-                with open(adapter_config_path, "r") as f:
-                    config = json.load(f)
-                if "lora_parameters" in config and "rank" not in config:
-                    # Only inject the actual LoRA parameters into the root
-                    # mlx_vlm's get_peft_model passes kwargs directly, so extra keys will crash it.
-                    clean_config = {}
-                    lora_params = config["lora_parameters"]
-                    for key in ["rank", "alpha", "dropout"]:
-                        if key in lora_params:
-                            clean_config[key] = lora_params[key]
-                        elif key == "alpha" and "scale" in lora_params and "rank" in lora_params:
-                            clean_config["alpha"] = lora_params["scale"] * lora_params["rank"]
-                    
-                    with open(adapter_config_path, "w") as f:
-                        json.dump(clean_config, f, indent=2)
-                elif "rank" not in config:
-                    clean_config = {"rank": 8, "alpha": 160.0, "dropout": 0.0}
-                    with open(adapter_config_path, "w") as f:
-                        json.dump(clean_config, f, indent=2)
-            except Exception as e:
-                print(f"Warning: Could not patch adapter_config.json: {e}")
-                
+        for line in process.stdout:
+            print(line, end="")
+            clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+            log_entry = None
+            train_match = train_pattern.search(clean_line)
+            if train_match:
+                log_entry = {
+                    "type": "train",
+                    "iter": int(train_match.group(1)),
+                    "loss": float(train_match.group(2)),
+                    "learning_rate": float(train_match.group(3)),
+                    "it_sec": float(train_match.group(4)),
+                    "tokens_sec": float(train_match.group(5)),
+                    "trained_tokens": int(train_match.group(6)),
+                    "peak_mem_gb": float(train_match.group(7))
+                }
+            val_match = val_pattern.search(clean_line)
+            if val_match:
+                log_entry = {
+                    "type": "val",
+                    "iter": int(val_match.group(1)),
+                    "loss": float(val_match.group(2)),
+                    "val_took_s": float(val_match.group(3))
+                }
+            if log_entry:
+                with open(log_file, "a") as f:
+                    f.write(json.dumps(log_entry) + "\n")
+        process.wait()
+
     end_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with open(log_file, "a") as f:
         f.write(json.dumps({"type": "status", "status": "completed", "timestamp": end_time}) + "\n")
+
 
 def run_eval(model_path, adapter_path, prompt, multimodal=False):
     """
     Tests the newly trained adapter by loading the base model, 
     injecting the adapter weights in memory, and generating text.
     """
-    print(f"==> Evaluating model...")
-    if multimodal:
-        cmd = [
-            "python", "-m", "mlx_vlm.generate",
-            "--model", model_path,
-            "--adapter-path", adapter_path,
-            "--prompt", prompt,
-            "--max-tokens", "200"
-        ]
+    print(f"==> Evaluating model with mlx-tune...")
+    is_vlm = _is_vlm_model(model_path, explicit_multimodal=multimodal)
+
+    try:
+        if is_vlm:
+            from mlx_tune import FastVisionModel
+            model_wrapper, processor = FastVisionModel.from_pretrained(model_path)
+            model_wrapper.load_adapter(adapter_path)
+            FastVisionModel.for_inference(model_wrapper)
+            response = model_wrapper.generate(prompt=prompt, max_tokens=256)
+            print("\n==> Model Response:")
+            print(response)
+            return
+        else:
+            from mlx_tune import FastLanguageModel
+            model_wrapper, tokenizer = FastLanguageModel.from_pretrained(model_path)
+            model_wrapper.load_adapter(adapter_path)
+            FastLanguageModel.for_inference(model_wrapper)
+
+            # Apply native chat template for instruction-tuned models
+            eval_prompt = prompt
+            if hasattr(tokenizer, "apply_chat_template"):
+                try:
+                    messages = [{"role": "user", "content": prompt}]
+                    eval_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                except Exception:
+                    pass
+
+            response = model_wrapper.generate(prompt=eval_prompt, max_tokens=256)
+            print("\n==> Model Response:")
+            print(response)
+            return
+    except Exception as e:
+        print(f"Note: Programmatic eval fallback ({e}); using CLI...")
+
+    if is_vlm:
+        cmd = ["python", "-m", "mlx_vlm.generate", "--model", model_path, "--adapter-path", adapter_path, "--prompt", prompt, "--max-tokens", "200"]
     else:
-        cmd = [
-            "python", "-m", "mlx_lm.generate",
-            "--model", model_path,
-            "--adapter-path", adapter_path,
-            "--prompt", prompt,
-            "--max-tokens", "200"
-        ]
+        cmd = ["python", "-m", "mlx_lm.generate", "--model", model_path, "--adapter-path", adapter_path, "--prompt", prompt, "--max-tokens", "200"]
+    subprocess.run(cmd)
     subprocess.run(cmd)
 
 def run_fuse(model_path, adapter_path, save_path, multimodal=False):
