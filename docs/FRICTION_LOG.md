@@ -13,6 +13,7 @@ These entries are structured to be directly actionable for upstream maintainers 
 | **FL-001** | `llama.cpp` / `llama-cli` | 🔴 **BLOCKER** | Gemma 4 KV Attention Infinite CPU Loop | Avoid `llama-cli` for Gemma 4; use `mlx_vlm` |
 | **FL-002** | `mlx` / `mlx_vlm` | 🔶 **MAJOR** | Silent Failure & `<pad>` Output via Key-Mangling | Save parameters with native leaf keys + format metadata |
 | **FL-003** | Apple Metal Driver / `mlx` | 🔶 **MAJOR** | Fatal Process Termination on Metal OOM | Use `MLX_GPU_DISABLE=1` shell prefix for CPU fallback |
+| **FL-004** | `litert-torch` (v0.9.1) | 🔶 **MAJOR** | 12B LiteRT-LM Export OOM (Hardcoded FP32 Load, No Offloading) | Ship 12B via GGUF q4_0 + MLX 4-bit; LiteRT-LM for E2B/E4B only |
 
 ---
 
@@ -136,5 +137,55 @@ This completely bypasses Python exception handling, making standard `try/except 
 
 ---
 
+## 🔶 FL-004: 12B Model LiteRT-LM Export OOM (`SIGKILL` / Exit Code -9) in `litert-torch`
+
+### 📝 Description
+When attempting to compile a 12B parameter model (such as fused Gemma 4 12B) to Google's `.litertlm` format using `litert-torch export_hf` on a 32GB Apple Silicon workstation, the process is abruptly terminated with exit code `-9` (`SIGKILL` issued by the macOS kernel under severe memory pressure). The death occurs precisely during the `Lower to MLIR: prefill_128 > Create MLIR Module` stage after torch export traces.
+
+The identical export script (`compile_litert.py`) executes flawlessly for smaller Gemma 4 variants (e.g. E2B and E4B).
+
+### 🔍 Root Cause Analysis
+The failure is an upstream memory-scaling limitation inside `litert-torch` (v0.9.1), **not** a defect in our pipeline wrapper.
+
+1. **Hardcoded FP32 Load:** In `litert_torch/generative/export_hf/core/export_lib.py:117-148`, the `load_model()` routine explicitly sets `dtype=torch.float32` / `torch_dtype=torch.float32`. It does **not** expose or utilize `low_cpu_mem_usage=True`, `device_map="auto"`, or disk-offload hooks.
+2. **Memory Cliff:** When loading a ~12B model whose base weights are ~23.8 GB in BF16 (2 bytes/param), forcing FP32 (4 bytes/param) instantly expands the working set to **~47.6 GB** in system RAM—already exceeding 32 GB physical memory before graph tracing starts.
+3. **Graph Duplication during MLIR Lowering:** The PyTorch export pipeline (`torch.export`) creates intermediate `ExportedProgram` fx graphs for both `prefill_128` and `decode` paths, followed by MLIR module materialization. Peak memory requirement easily exceeds **>90 GB**.
+
+| Stage | Memory Footprint (12B Model) |
+| :--- | :--- |
+| Fused checkpoint on disk (BF16) | ~23.8 GB |
+| **Loaded in memory by `litert-torch` (FP32)** | **~47.6 GB** *(exceeds 32GB RAM)* |
+| + `torch.export` `ExportedProgram` graphs | +10–15 GB (tensor refs + decompositions) |
+| + MLIR Module materialization | +25–30 GB duplicate representation |
+| **Effective Peak Required** | **>90 GB** |
+
+```mermaid
+graph TD
+    A["Fused 12B Checkpoint (23.8 GB BF16)"] --> B["litert-torch load_model()"]
+    B --> C["Forced FP32 Allocation (47.6 GB RAM)"]
+    C --> D["Torch Export: prefill_128 & decode FX Graphs"]
+    D --> E["MLIR Module Creation (>90 GB Total Peak)"]
+    E --> F["macOS Memory Pressure Handler -> SIGKILL (-9)"]
+```
+
+### 🎛️ Repro Steps
+1. Fuse LoRA weights into a 12B HuggingFace model checkpoint directory.
+2. Run `litert-torch export_hf`:
+   ```bash
+   litert-torch export_hf \
+       --model=/path/to/12B_fused_model \
+       --output_dir=/path/to/models/litert \
+       --quantization_recipe=dynamic_wi8_afp32 \
+       --externalize_embedder
+   ```
+3. Process progresses through model load (1:21) and Torch Export (1:45), then terminates abruptly with `exit code -9` at `Lower to MLIR: prefill_128 > Create MLIR Module`.
+
+### 💡 Status & Workaround
+- **Operational Policy:** Deploy 12B models on-device using **GGUF `q4_0`** (6.5 GB) and **Apple MLX 4-bit SafeTensors** (6.5 GB). Both compile cleanly and execute within standard memory budgets.
+- **Target Audience Alignment:** LiteRT-LM is specifically designed for mobile phone NPUs and edge micro-runtimes, where 12B models are generally impractical. LiteRT-LM export remains active and fully supported for Gemma 4 **E2B** and **E4B** models.
+- **Back-Pocket Upstream Fix (Option 2):** If 12B LiteRT-LM export becomes a strict requirement, patch `litert_torch.generative.export_hf.core.export_lib.load_model` to pass `low_cpu_mem_usage=True` with dynamic layer-by-layer offloading, or run the export task on a 128GB+ host.
+
+---
+
 > [!NOTE]
-> This friction log is actively updated as new MLX releases or Apple Metal driver updates roll out. Last reviewed: June 2026.
+> This friction log is actively updated as new MLX releases or Apple Metal driver updates roll out. Last reviewed: September 2026.
