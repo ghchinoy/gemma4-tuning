@@ -76,6 +76,6 @@ Just like text models, once the LoRA training finishes, the adapter weights must
 Because we are using `mlx-vlm`, the `mlxtune fuse` command will fuse adapters into *both* the language model and the audio encoder simultaneously, producing a single, monolithic `.safetensors` directory ready for our `ask_audio.py` script or the upcoming native Swift implementation.
 
 ### Export Format Compatibility Matrix
-*   **GGUF `q4_0`:** Supported for all architectures (E2B, E4B, 12B). Preserves QAT calibration.
+*   **GGUF `q4_0`:** Verified for E2B, E4B and 12B (Sept 2026, via mlx-tune `export_to_gguf(qat=True)`): tensor layout and types match Google's official QAT GGUFs, and all three load and generate in llama.cpp. Text model only; audio/vision need a separate `mmproj` file. Check vocab = 262144 (see FL-005).
 *   **Apple MLX 4-bit SafeTensors:** Supported for all architectures. Native high-throughput Apple Silicon inference.
 *   **LiteRT-LM (`.litertlm`):** Optimized for edge NPU deployment on **E2B** and **E4B** mobile models. Note: Exporting 12B models via `litert-torch` requires >90GB RAM due to upstream FP32 graph materialization (see `docs/FRICTION_LOG.md` entry **FL-004**).

@@ -14,6 +14,8 @@ These entries are structured to be directly actionable for upstream maintainers 
 | **FL-002** | `mlx` / `mlx_vlm` | 🔶 **MAJOR** | Silent Failure & `<pad>` Output via Key-Mangling | Save parameters with native leaf keys + format metadata |
 | **FL-003** | Apple Metal Driver / `mlx` | 🔶 **MAJOR** | Fatal Process Termination on Metal OOM | Use `MLX_GPU_DISABLE=1` shell prefix for CPU fallback |
 | **FL-004** | `litert-torch` (v0.9.1) | 🔶 **MAJOR** | 12B LiteRT-LM Export OOM (Hardcoded FP32 Load, No Offloading) | Ship 12B via GGUF q4_0 + MLX 4-bit; LiteRT-LM for E2B/E4B only |
+| **FL-005** | Our pipeline / `convert_hf_to_gguf.py` | 🔴 **BLOCKER** | Gemma 4 GGUF Built With Gemma 2 `tokenizer.model` (Unloadable) | Never copy a `tokenizer.model` the source checkpoint doesn't ship; verify vocab = 262144 |
+| **FL-006** | `mlx_lm` training (raw `text` data) | 🔶 **MAJOR** | LoRA Trained Without `<bos>` Doesn't Transfer to llama.cpp / HF on Gemma 4 E4B | Train with chat-template (`messages`) data, or prepend `<bos>` to raw text |
 
 ---
 
@@ -181,9 +183,52 @@ graph TD
 3. Process progresses through model load (1:21) and Torch Export (1:45), then terminates abruptly with `exit code -9` at `Lower to MLIR: prefill_128 > Create MLIR Module`.
 
 ### 💡 Status & Workaround
-- **Operational Policy:** Deploy 12B models on-device using **GGUF `q4_0`** (6.5 GB) and **Apple MLX 4-bit SafeTensors** (6.5 GB). Both compile cleanly and execute within standard memory budgets.
+- **Operational Policy:** Deploy 12B models on-device using **GGUF `q4_0`** (~7.0 GB) and **Apple MLX 4-bit SafeTensors** (6.5 GB). *Correction (Sept 2026):* the 12B GGUF originally shipped with this policy was unloadable (FL-005); it was rebuilt and verified to load and generate in llama.cpp. The MLX 4-bit build was unaffected.
 - **Target Audience Alignment:** LiteRT-LM is specifically designed for mobile phone NPUs and edge micro-runtimes, where 12B models are generally impractical. LiteRT-LM export remains active and fully supported for Gemma 4 **E2B** and **E4B** models.
 - **Back-Pocket Upstream Fix (Option 2):** If 12B LiteRT-LM export becomes a strict requirement, patch `litert_torch.generative.export_hf.core.export_lib.load_model` to pass `low_cpu_mem_usage=True` with dynamic layer-by-layer offloading, or run the export task on a 128GB+ host.
+
+---
+
+## 🔴 FL-005: Gemma 4 GGUF Built With a Gemma 2 `tokenizer.model` (Unloadable)
+
+### 📝 Description
+The first Eldamo Gemma 4 12B GGUF (`eldamo-gemma-q4_0.gguf`) converted and quantized without errors, but llama.cpp refused to load it:
+```
+check_tensor_dims: tensor 'token_embd.weight' has wrong shape; expected 3840, 262144, got 3840, 256000
+```
+
+### 🔍 Root Cause Analysis
+This was our pipeline's fault, not an upstream bug. Gemma 4 checkpoints ship **only `tokenizer.json`** (vocab **262,144**) and no SentencePiece `tokenizer.model`. When llama.cpp's converter asked for a `tokenizer.model`, we copied `gemmma/model/tokenizer.model` into the fused directory. That file came from the **Gemma 2** test model (vocab **256,000**). The converter preferred it over `tokenizer.json`, so it wrote a 256,000-row vocabulary and embedding. Conversion "succeeded" and the error only showed up at load time.
+
+### 🎛️ Repro Steps
+1. Fuse a Gemma 4 LoRA into a HF-format directory.
+2. Copy any Gemma 2/3 `tokenizer.model` into that directory.
+3. Run `convert_hf_to_gguf.py` + `llama-quantize`, then load the result in llama.cpp.
+
+### 💡 Workaround
+- Never add a `tokenizer.model` that the **source checkpoint** doesn't ship. The mlx-tune GGUF export (`ghchinoy/mlx-tune@fix/gguf-export-llama-cpp`) copies tokenizer assets only from the source model, so it avoids this by design.
+- Verify every Gemma 4 GGUF before shipping it: `token_embd.weight` must be `[hidden, 262144]` and `tokenizer.ggml.tokens` must have 262,144 entries.
+- Resolved (Sept 2026): the 12B was retrained with the fork's mlx-tune (100 iters, val loss 6.14 → 3.75) and exported with `export_to_gguf(qat=True)`. The resulting GGUF is structurally identical to Google's official 12B QAT GGUF (same 667 tensors, types and shapes) and generates correctly in llama.cpp. It replaced the broken file.
+
+---
+
+## 🔶 FL-006: LoRA Trained Without `<bos>` Doesn't Transfer to llama.cpp / HF on Gemma 4 E4B
+
+### 📝 Description
+A LoRA trained with mlx-tune on **raw `{"text": ...}` data** on Gemma 4 E4B answered correctly in MLX. The same weights exported to GGUF (at f16, q8_0 and q4_0 alike) gave the base-like or broken answer in llama.cpp. The E2B model with the same recipe transferred fine.
+
+### 🔍 Root Cause Analysis
+The weights in the export were correct. MLX, loading the merged HF directory, still gave the trained answer, and only the LoRA-targeted tensors differed from the base. The difference was the **`<bos>` token**:
+- The Gemma 4 tokenizer has `add_bos_token: false`, so mlx-lm's `TextDataset` trains on **text without `<bos>`**, and `mlx_lm.generate` also prompts without it.
+- llama.cpp (from GGUF metadata) and Hugging Face transformers **prepend `<bos>`**.
+- With `<bos>` in front, the MLX-trained E4B behaved like the base model even inside MLX. The LoRA had only learned the no-`<bos>` distribution, and E4B is sensitive to it.
+
+Confirmed by retraining with `<bos>` included in the text. That run passed end to end: MLX, the q4_0 GGUF in llama.cpp, and the base-model control all behaved as expected. Chat-format (`messages`) data isn't affected, because the Gemma 4 chat template starts with `<bos>`. The Eldamo training data is chat format.
+
+### 💡 Workaround
+- Prefer `messages` / chat-template training data for Gemma 4.
+- For raw-text data, prepend `<bos>` (or the tokenizer's `bos_token`) to each sample.
+- When comparing MLX and GGUF outputs, feed both the same tokens (`<bos>` included).
 
 ---
 
